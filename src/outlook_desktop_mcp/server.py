@@ -31,13 +31,13 @@ from outlook_desktop_mcp import __version__
 
 from outlook_desktop_mcp.tools import calendars as calendars_mod
 from outlook_desktop_mcp.tools.calendars import describe_calendars, is_people_calendar, resolve_calendars
-from outlook_desktop_mcp.tools.conversation import conversation_items
+from outlook_desktop_mcp.tools.conversation import conversation_items, folder_path
 from outlook_desktop_mcp.utils import dasl, deadline, settings
 from outlook_desktop_mcp.utils.addresses import format_recipients, get_smtp, sender_matches
 from outlook_desktop_mcp.utils.dates import iso
 from outlook_desktop_mcp.utils.extract import extract
 from outlook_desktop_mcp.utils.html import (
-    inject_into_body, open_drafts_default, plain_text_mode, replace_note, style_html, text_to_html, wrap_note,
+    inject_into_body, plain_text_mode, replace_note, style_html, text_to_html, wrap_note,
 )
 from outlook_desktop_mcp.tools._folder_constants import (
     FOLDER_NAME_TO_ENUM,
@@ -88,6 +88,10 @@ def _safe_dasl(query: str) -> str:
 _OL_CLASS_MAIL = 43
 _OL_CLASS_APPOINTMENT = 26
 _OL_CLASS_TASK = 48
+_OL_CLASS_NAMES = {43: "email", 26: "appointment", 48: "task", 40: "contact", 44: "note", 45: "post",
+                   53: "meeting request", 54: "meeting cancellation", 55: "meeting response",
+                   56: "meeting response", 57: "meeting response"}
+_OL_DISCARD = 1  # OlInspectorClose.olDiscard: close an unsaved item without keeping anything
 
 
 def _check_item_class(item, expected_class: int, label: str) -> str | None:
@@ -119,10 +123,25 @@ _INSTRUCTIONS = (
     "tasks, and it can WRITE DRAFTS.\n\n"
     "NOTHING THIS SERVER DOES SENDS A MESSAGE. draft_email, draft_reply, draft_forward "
     "and draft_meeting save the item (to Drafts, or to the calendar with invitations "
-    "unsent); it opens in an Outlook window only if the open_drafts setting is on. The "
-    "user reads it and presses Send themselves. There is no tool to send, to respond to "
-    "an invitation, or to cancel a meeting the user organised, because each of those "
-    "would send. Tell the user where the draft is and that they need to send it.\n\n"
+    "unsent). By default an unsent meeting opens in an Outlook window and an email draft "
+    "stays in Drafts without one (the open_in_outlook setting: none, meetings or all); "
+    "the open_in_outlook tool opens any saved item when the user asks for that. The user "
+    "reads it and presses Send themselves. There is no tool to send, to respond to an "
+    "invitation, or to cancel a meeting the user organised, because each of those would "
+    "send. Tell the user where the draft is and that they need to send it.\n\n"
+    "WHEN TO USE THIS SERVER. This is the user's primary mailbox, calendar and task list. "
+    "When the user asks about email, calendar, meetings, availability, tasks or a contact "
+    "without naming a service, use these tools, not Gmail, Google Calendar or any other "
+    "mail or calendar connector. Use another service only when the user names it, or when "
+    "a search here finds nothing and the user agrees to look elsewhere. Several tool names "
+    "here (list_events, search_events, create_event) also exist on other connectors; when "
+    "in doubt, the outlook-desktop one is the default.\n\n"
+    "CONTEXT BEFORE A REPLY. The user often has not opened the email in Outlook. Before "
+    "showing a reply or forward draft, call reply_context on the message and open the "
+    "chat preview with a Context block of two to four lines: who is on the thread, what "
+    "has been said, what the newest message asks. Use the To/CC from reply_context, which "
+    "are Outlook's own, not a guess. thread_depth on every message says how deep in a "
+    "thread it sits (0 = first message); get_conversation shows the whole thread.\n\n"
     + _INSTRUCTIONS_COMMON
     + "FINDING MAIL QUICKLY. Outlook filters by sender, recipient, subject and date in "
     "well under a second even in a 10,000-message folder, so prefer those: search_emails "
@@ -136,8 +155,8 @@ _INSTRUCTIONS = (
     "the request instead of repeating it.\n\n"
     "AVAILABLE TOOL CATEGORIES:\n"
     "- Email: list, read, search (sender/subject/body filters), get_conversation, "
-    "contact_history, draft_email, draft_reply, draft_forward, update_draft, "
-    "mark read/unread, move, attachments\n"
+    "reply_context, contact_history, draft_email, draft_reply, draft_forward, "
+    "update_draft, open_in_outlook, mark read/unread, move, attachments\n"
     "- Calendar: list_calendars, list events, create appointments, draft_meeting "
     "(invitations unsent), update, delete (not organised meetings), search events\n"
     "- Tasks: create, list, complete, delete to-do items\n"
@@ -466,17 +485,13 @@ def _attach_files(item, paths: str) -> list[dict]:
     return added
 
 
-def _save_draft(item, kind: str, open_in_outlook: bool | None, **extra) -> str:
-    """Save ``item`` without sending, optionally open it in Outlook, describe the result.
-
-    ``open_in_outlook=None`` means "use the OUTLOOK_MCP_OPEN_DRAFTS setting", which is
-    off by default: the draft just lands in Drafts.
+def _save_draft(item, kind: str, **extra) -> str:
+    """Save ``item`` without sending, open it in Outlook if the open_in_outlook setting says
+    drafts of this ``kind`` should open (by default only meetings do), describe the result.
     """
     item.Save()
-    if open_in_outlook is None:
-        open_in_outlook = open_drafts_default()
     opened = False
-    if open_in_outlook:
+    if settings.should_open(kind):
         try:
             item.Display()
             opened = True
@@ -516,9 +531,9 @@ async def draft_email(
     html_body: str = "",
     account: str = "",
     attachments: str = "",
-    open_in_outlook: bool | None = None,
 ) -> str:
-    """Write a new email to the Drafts folder. It is NOT sent.
+    """Write a new email to the Drafts folder of the user's main mailbox (Outlook).
+    It is NOT sent.
 
     BEFORE CALLING THIS: show the complete draft in the chat first (recipients,
     subject, full text) and work on it there until the user is happy. Then ask
@@ -529,8 +544,9 @@ async def draft_email(
 
     The draft is saved in the chosen account's Drafts folder, with the user's
     signature below the text, for the user to open, read and press Send
-    themselves (it opens in an Outlook window only if the open_drafts setting
-    or open_in_outlook says so). The text is written as HTML in
+    themselves. It stays in Drafts without a window unless the open_in_outlook
+    setting is "all"; the open_in_outlook tool opens it if the user asks. The
+    text is written as HTML in
     the user's default font (Aptos 12 pt black unless the OUTLOOK_MCP_FONT_*
     environment variables say otherwise). Write the body as normal prose with
     blank lines between paragraphs. Light structure is rendered properly: lines
@@ -553,15 +569,12 @@ async def draft_email(
             to see available accounts.
         attachments: Optional. Full path(s) of file(s) on this PC to attach,
             separated by semicolons.
-        open_in_outlook: Optional. True also opens the draft in an Outlook
-            window; false only saves it to Drafts. Leave unset to follow the
-            OUTLOOK_MCP_OPEN_DRAFTS setting (default: only save).
 
     Returns:
         JSON with status "draft_saved", sent=false, entry_id, folder and whether
         it was opened in Outlook. Tell the user the draft is waiting for them.
     """
-    def _draft(outlook, namespace, to, subject, body, cc, bcc, html_body, account, attachments, open_in_outlook):
+    def _draft(outlook, namespace, to, subject, body, cc, bcc, html_body, account, attachments):
         store = _require_store(namespace, account)
         mail = store.GetDefaultFolder(OL_FOLDER_DRAFTS).Items.Add(OL_MAIL_ITEM)
         _set_sending_account(mail, outlook, store)
@@ -573,10 +586,10 @@ async def draft_email(
         mail.Subject = subject
         files = _attach_files(mail, attachments)
         _write_draft_text(mail, body, html_body)
-        return _save_draft(mail, "email", open_in_outlook, to=to, cc=cc, bcc=bcc, files_attached=files)
+        return _save_draft(mail, "email", to=to, cc=cc, bcc=bcc, files_attached=files)
 
     try:
-        return await bridge.call(_draft, to, subject, body, cc, bcc, html_body, account, attachments, open_in_outlook)
+        return await bridge.call(_draft, to, subject, body, cc, bcc, html_body, account, attachments)
     except Exception as e:
         return f"Error writing draft: {format_com_error(e)}"
 
@@ -722,7 +735,7 @@ async def list_emails(
     include_subfolders: bool = False,
     account: str = "",
 ) -> str:
-    """List recent emails from a specified Outlook folder.
+    """List recent emails from a folder in the user's main mailbox (Outlook).
 
     Returns a JSON array of email summaries sorted by received time (newest
     first). Each summary includes entry_id, subject, sender (SMTP address),
@@ -832,7 +845,10 @@ async def read_email(
         JSON object with full email details (entry_id, subject, sender,
         sender_name, received_time, sent_time, folder, unread, to, cc,
         recipients with SMTP addresses, body, body_trimmed, body_truncated,
-        attachment info, conversation_id).
+        attachment info, conversation_id, thread_depth). thread_depth is 0 for
+        the first message of a thread, 1 for a reply to it, and so on; when it
+        is above 0 there are earlier messages the user may not have seen, so
+        use reply_context or get_conversation before acting on it.
     """
     def _read(outlook, namespace, entry_id, subject_search, folder, include_history, account):
         trim = not include_history
@@ -937,6 +953,174 @@ async def get_conversation(
         return await bridge.call(_get, entry_id, count, include_bodies, max_body_chars, account)
     except Exception as e:
         return f"Error reading conversation: {format_com_error(e)}"
+
+
+# =====================================================================
+# TOOL: reply_context
+# =====================================================================
+
+@mcp.tool()
+async def reply_context(
+    entry_id: str,
+    reply_all: bool = False,
+    count: int = 10,
+    max_body_chars: int = 600,
+    account: str = "",
+) -> str:
+    """What a reply draft needs before it is shown in the chat: the recipients
+    Outlook's own Reply or Reply All would address, who is on the thread, a
+    short digest of the earlier messages, and the message being answered in
+    full. Reads only; no draft is created or saved.
+
+    CALL THIS BEFORE SHOWING A REPLY OR FORWARD DRAFT. The user often has not
+    opened the email in Outlook, so start the chat preview with a Context block
+    of two to four lines (who is on the thread, what has been said, what the
+    newest message asks), then the draft with the To/CC from this result, which
+    are Outlook's own rather than a guess.
+
+    Args:
+        entry_id: EntryID of the message to answer (from list_emails,
+            search_emails, read_email or get_conversation).
+        reply_all: True for the Reply All recipients, false (default) for Reply.
+        count: Most recent messages of the thread to digest. Default 10, max 50.
+        max_body_chars: Characters of each earlier message's own text to
+            include in the digest. Default 600.
+        account: Optional. Account display name (or substring). Only needed
+            if entry_id is ambiguous across stores.
+
+    Returns:
+        JSON: subject (as the reply would carry it), reply_all, recipients
+        {to, cc, resolved: [{name, address, type}]}, participants
+        [{name, address}], thread_depth of the message, requested_is_newest
+        (false means newer messages exist in the thread), message_count,
+        source, thread [{entry_id, date, from, from_name, folder, thread_depth,
+        is_requested_message, text}] oldest first, and message (the answered
+        message in full, quoted history removed).
+    """
+    def _ctx(outlook, namespace, entry_id, reply_all, count, max_body_chars, account):
+        count = min(max(1, int(count or 10)), 50)
+        max_body_chars = max(80, int(max_body_chars or 600))
+        if account:
+            store = _require_store(namespace, account)
+            item = namespace.GetItemFromID(entry_id, store.StoreID)
+        else:
+            item = namespace.GetItemFromID(entry_id)
+            store = _safe_get(lambda: item.Parent.Store) or _require_store(namespace, "")
+        if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
+            return err
+
+        # Let Outlook work out the recipients exactly as Reply / Reply All would, then
+        # throw the unsaved reply away: nothing reaches Drafts.
+        recipients = {"to": "", "cc": "", "resolved": []}
+        subject = str(_safe_get(lambda: item.Subject) or "")
+        probe = None
+        try:
+            probe = item.ReplyAll() if reply_all else item.Reply()
+            recipients = {
+                "to": str(_safe_get(lambda: probe.To) or ""),
+                "cc": str(_safe_get(lambda: probe.CC) or ""),
+                "resolved": format_recipients(probe),
+            }
+            subject = str(_safe_get(lambda: probe.Subject) or subject)
+        except Exception as e:
+            logger.warning("Could not build reply recipients: %s", e)
+        finally:
+            if probe is not None:
+                try:
+                    probe.Close(_OL_DISCARD)
+                except Exception:
+                    pass
+
+        messages, source = conversation_items(store, item, limit=count)
+        requested_id = str(item.EntryID)
+        thread, participants = [], {}
+        for path, node in messages:
+            try:
+                record = format_email_full(node, body_max_length=max_body_chars)
+            except Exception:
+                continue
+            for recipient in record.get("recipients", []):
+                if recipient.get("address"):
+                    participants.setdefault(recipient["address"], recipient.get("name") or "")
+            if record.get("sender"):
+                participants.setdefault(record["sender"], record.get("sender_name") or "")
+            thread.append({
+                "entry_id": record["entry_id"],
+                "date": record.get("sent_time") or record.get("received_time"),
+                "from": record.get("sender"),
+                "from_name": record.get("sender_name"),
+                "folder": path or record.get("folder", ""),
+                "thread_depth": record.get("thread_depth"),
+                "is_requested_message": str(record["entry_id"]) == requested_id,
+                "text": record.get("body", ""),
+            })
+        newest_id = str(thread[-1]["entry_id"]) if thread else requested_id
+        message = format_email_full(item)
+        return json.dumps({
+            "subject": subject,
+            "reply_all": reply_all,
+            "recipients": recipients,
+            "participants": [{"name": name, "address": address} for address, name in participants.items()],
+            "thread_depth": message.get("thread_depth"),
+            "requested_is_newest": newest_id == requested_id,
+            "message_count": len(thread),
+            "source": source,
+            "thread": thread,
+            "message": message,
+            "note": "Nothing was created or saved. Open the chat preview with a short Context block "
+                    "built from this, then the draft with these recipients.",
+        }, indent=2, default=str)
+
+    try:
+        return await bridge.call(_ctx, entry_id, reply_all, count, max_body_chars, account)
+    except Exception as e:
+        return f"Error building reply context: {format_com_error(e)}"
+
+
+# =====================================================================
+# TOOL: open_in_outlook
+# =====================================================================
+
+@mcp.tool()
+async def open_in_outlook(entry_id: str, account: str = "") -> str:
+    """Open an existing item in its own Outlook window so the user can read it
+    there: an email (and from it the thread in Outlook's own view), a draft
+    this server saved, an unsent meeting, an appointment or a task. Nothing is
+    changed and nothing is sent.
+
+    Use it when the user asks to see something in Outlook ("open that email",
+    "show me the thread in Outlook", "open the draft"). Do not call it on your
+    own after saving a draft; the open_in_outlook setting decides that.
+
+    Args:
+        entry_id: EntryID of the item (from any list, search, read or draft
+            result).
+        account: Optional. Account display name (or substring). Only needed
+            if entry_id is ambiguous across stores.
+
+    Returns:
+        JSON with status "opened", the item's kind, subject and folder.
+    """
+    def _open(outlook, namespace, entry_id, account):
+        if account:
+            store = _require_store(namespace, account)
+            item = namespace.GetItemFromID(entry_id, store.StoreID)
+        else:
+            item = namespace.GetItemFromID(entry_id)
+        item.Display()
+        return json.dumps({
+            "status": "opened",
+            "kind": _OL_CLASS_NAMES.get(int(_safe_get(lambda: item.Class, 0) or 0), "item"),
+            "subject": str(_safe_get(lambda: item.Subject) or ""),
+            "folder": folder_path(item),
+            "entry_id": str(_safe_get(lambda: item.EntryID) or entry_id),
+            "note": "Open in an Outlook window on the user's screen. Nothing was changed or sent.",
+        }, indent=2, default=str)
+
+    try:
+        return await bridge.call(_open, entry_id, account)
+    except Exception as e:
+        return f"Error opening item in Outlook: {format_com_error(e)}"
 
 
 # =====================================================================
@@ -1075,22 +1259,23 @@ async def draft_reply(
     reply_all: bool = False,
     account: str = "",
     attachments: str = "",
-    open_in_outlook: bool | None = None,
 ) -> str:
     """Write a reply to an email as a draft. It is NOT sent.
 
-    BEFORE CALLING THIS: show the complete draft in the chat first (recipients,
-    subject, full text above the quoted thread) and work on it there until the user is happy. Then ask
-    explicitly, as its own question, whether to put it in Outlook, and call this
-    tool only after the user says yes. Never call it as the first step of a
-    "write an email" request. The user wants to see and edit drafts in the
-    conversation, not discover them in Outlook.
+    BEFORE CALLING THIS: call reply_context on the message, then show the
+    complete draft in the chat (a short Context block about the thread, then
+    recipients, subject and the full text above the quoted thread) and work on
+    it there until the user is happy. Then ask explicitly, as its own question,
+    whether to put it in Outlook, and call this tool only after the user says
+    yes. Never call it as the first step of a "write an email" request. The
+    user wants to see and edit drafts in the conversation, not discover them in
+    Outlook.
 
     Creates Outlook's normal reply (recipients filled in, quoted history and
     signature below), puts the text above it in the user's default font and
-    saves it to Drafts for the user to read and press Send themselves (it opens
-    in an Outlook window only if the open_drafts setting or open_in_outlook
-    says so).
+    saves it to Drafts for the user to read and press Send themselves. It stays
+    in Drafts without a window unless the open_in_outlook setting is "all"; the
+    open_in_outlook tool opens it if the user asks.
 
     Args:
         entry_id: The unique Outlook EntryID of the email to reply to.
@@ -1101,15 +1286,12 @@ async def draft_reply(
             if entry_id is ambiguous across stores.
         attachments: Optional. Full path(s) of file(s) on this PC to attach,
             separated by semicolons.
-        open_in_outlook: Optional. True also opens the draft in an Outlook
-            window; false only saves it to Drafts. Leave unset to follow the
-            OUTLOOK_MCP_OPEN_DRAFTS setting (default: only save).
 
     Returns:
         JSON with status "draft_saved", sent=false, entry_id of the draft and
         the folder it is in. Tell the user the draft is waiting for them.
     """
-    def _reply(outlook, namespace, entry_id, body, reply_all, account, attachments, open_in_outlook):
+    def _reply(outlook, namespace, entry_id, body, reply_all, account, attachments):
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
@@ -1121,13 +1303,13 @@ async def draft_reply(
         files = _attach_files(reply_item, attachments)
         _write_draft_text(reply_item, body)
         return _save_draft(
-            reply_item, "reply_all" if reply_all else "reply", open_in_outlook,
+            reply_item, "reply_all" if reply_all else "reply",
             in_reply_to=str(item.Subject or ""), to=str(_safe_get(lambda: reply_item.To) or ""),
             cc=str(_safe_get(lambda: reply_item.CC) or ""), files_attached=files,
         )
 
     try:
-        return await bridge.call(_reply, entry_id, body, reply_all, account, attachments, open_in_outlook)
+        return await bridge.call(_reply, entry_id, body, reply_all, account, attachments)
     except Exception as e:
         return f"Error writing reply draft: {format_com_error(e)}"
 
@@ -1178,14 +1360,14 @@ async def draft_forward(
     forward_latest_in_thread: bool = True,
     include_thread_attachments: bool = False,
     attachments: str = "",
-    open_in_outlook: bool | None = None,
 ) -> str:
     """Forward an email as a draft. It is NOT sent.
 
-    BEFORE CALLING THIS: show the complete draft in the chat first (recipients,
-    which message is being forwarded, the full note that goes above it, and
-    which attachments will ride along) and work on it there until the user is
-    happy. Then ask explicitly, as its own question, whether to put it in
+    BEFORE CALLING THIS: call reply_context on the message so you know the
+    thread, then show the complete draft in the chat first (a short Context
+    block about what is being forwarded, recipients, which message is being
+    forwarded, the full note that goes above it, and which attachments will
+    ride along) and work on it there until the user is happy. Then ask explicitly, as its own question, whether to put it in
     Outlook, and call this tool only after the user says yes. Never call it as
     the first step of a "forward this" request. The user wants to see and edit
     drafts in the conversation, not discover them in Outlook.
@@ -1194,8 +1376,8 @@ async def draft_forward(
     header block, the quoted message and its attachments carry over exactly as
     a manual forward would. The note is placed above all of that in the user's
     default font, with the signature handled the same way as a reply. The
-    result is saved to Drafts (opened in a window only if the
-    OUTLOOK_MCP_OPEN_DRAFTS setting or open_in_outlook says so).
+    result is saved to Drafts; it opens in a window only if the open_in_outlook
+    setting is "all".
 
     Attachments come only from the message being forwarded unless
     include_thread_attachments is set.
@@ -1220,9 +1402,6 @@ async def draft_forward(
             Default false.
         attachments: Optional. Full path(s) of file(s) on this PC to attach in
             addition, separated by semicolons.
-        open_in_outlook: Optional. True also opens the draft in an Outlook
-            window; false only saves it to Drafts. Leave unset to follow the
-            OUTLOOK_MCP_OPEN_DRAFTS setting (default: only save).
 
     Returns:
         JSON with status "draft_saved", sent=false, entry_id of the draft, its
@@ -1232,7 +1411,7 @@ async def draft_forward(
         user where the draft is.
     """
     def _forward(outlook, namespace, entry_id, to, body, cc, bcc, account,
-                 forward_latest_in_thread, include_thread_attachments, attachments, open_in_outlook):
+                 forward_latest_in_thread, include_thread_attachments, attachments):
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
@@ -1302,7 +1481,7 @@ async def draft_forward(
         newest_id = str(_safe_get(lambda: thread[-1][1].EntryID) or "") if thread else source_id
         try:
             return _save_draft(
-                fwd, "forward", open_in_outlook,
+                fwd, "forward",
                 forwarded_entry_id=source_id,
                 forwarded_subject=str(_safe_get(lambda: source.Subject) or ""),
                 forwarded_is_latest=(source_id == newest_id),
@@ -1316,7 +1495,7 @@ async def draft_forward(
     try:
         return await bridge.call(
             _forward, entry_id, to, body, cc, bcc, account,
-            forward_latest_in_thread, include_thread_attachments, attachments, open_in_outlook,
+            forward_latest_in_thread, include_thread_attachments, attachments,
         )
     except Exception as e:
         return f"Error writing forward draft: {format_com_error(e)}"
@@ -1456,8 +1635,9 @@ async def search_emails(
     include_body: bool = False,
     account: str = "",
 ) -> str:
-    """Find emails by sender, subject text and/or date. Fast: Outlook does the
-    filtering, well under a second even in a 10,000-message folder.
+    """Find emails in the user's main mailbox (Outlook) by sender, subject text
+    and/or date. Fast: Outlook does the filtering, well under a second even in a
+    10,000-message folder.
 
     Start here for "find the email from X" or "the thread about Y". A sender
     filter alone lists everything from a person or domain; a subject word finds a
@@ -1677,7 +1857,7 @@ async def list_events(
     calendar: str = "",
     account: str = "",
 ) -> str:
-    """List calendar events from Outlook within a date range.
+    """List events from the user's primary calendar (Outlook) within a date range.
 
     Returns a JSON array of event summaries sorted by start time, including
     recurring occurrences and events that started before the range but run
@@ -1769,7 +1949,7 @@ async def create_event(
     reminder_minutes: int = 15,
     account: str = "",
 ) -> str:
-    """Create a personal calendar appointment (no attendees).
+    """Create a personal appointment (no attendees) on the user's primary calendar (Outlook).
 
     Creates and saves an appointment on the user's calendar. This is a
     personal event with no attendees. Use draft_meeting instead if you need
@@ -1848,9 +2028,9 @@ async def draft_meeting(
     body: str = "",
     optional_attendees: str = "",
     account: str = "",
-    open_in_outlook: bool | None = None,
 ) -> str:
-    """Prepare a meeting with attendees on the calendar. Invitations are NOT sent.
+    """Prepare a meeting with attendees on the user's primary calendar (Outlook).
+    Invitations are NOT sent.
 
     BEFORE CALLING THIS: show the complete invitation in the chat first (attendees,
     subject, time, location, text) and work on it there until the user is happy. Then ask
@@ -1861,8 +2041,9 @@ async def draft_meeting(
 
     The meeting is saved on the user's calendar with the attendees filled in
     and invitations unsent (Outlook marks it "invitations have not been sent")
-    for the user to check and press Send themselves (it opens in an Outlook
-    window only if the open_drafts setting or open_in_outlook says so).
+    for the user to check and press Send themselves. By default it opens in an
+    Outlook window so it is not lost on the calendar (open_in_outlook setting
+    "meetings"; "none" keeps it closed).
 
     Args:
         subject: The meeting title.
@@ -1877,16 +2058,13 @@ async def draft_meeting(
         account: Optional. Account display name (or substring) whose calendar
             the meeting goes on and which it will be sent from. Default: primary
             account. Use list_accounts to see available accounts.
-        open_in_outlook: Optional. True also opens the meeting in an Outlook
-            window; false only saves it to the calendar. Leave unset to follow
-            the OUTLOOK_MCP_OPEN_DRAFTS setting (default: only save).
 
     Returns:
         JSON with status "draft_saved", sent=false, entry_id and the calendar
         folder. Tell the user the invitation is waiting for them to send.
     """
     def _draft(outlook, namespace, subject, start, end, required_attendees,
-               location, body, optional_attendees, account, open_in_outlook):
+               location, body, optional_attendees, account):
         store = _require_store(namespace, account)
         appt = store.GetDefaultFolder(OL_FOLDER_CALENDAR).Items.Add(OL_APPOINTMENT_ITEM)
         if account:
@@ -1915,7 +2093,7 @@ async def draft_meeting(
 
         appt.Recipients.ResolveAll()
         return _save_draft(
-            appt, "meeting", open_in_outlook,
+            appt, "meeting",
             start=str(appt.Start), end=str(appt.End),
             required_attendees=required_attendees, optional_attendees=optional_attendees,
         )
@@ -1923,7 +2101,7 @@ async def draft_meeting(
     try:
         return await bridge.call(
             _draft, subject, start, end, required_attendees, location, body,
-            optional_attendees, account, open_in_outlook,
+            optional_attendees, account,
         )
     except Exception as e:
         return f"Error preparing meeting: {format_com_error(e)}"
@@ -2064,7 +2242,7 @@ async def search_events(
     calendar: str = "",
     account: str = "",
 ) -> str:
-    """Search for calendar events by keyword.
+    """Search the user's primary calendar (Outlook) for events by keyword.
 
     Searches event subjects within a date range. Results are sorted by
     start time. Includes recurring event occurrences.
@@ -2109,7 +2287,7 @@ async def list_tasks(
     count: int = 20,
     account: str = "",
 ) -> str:
-    """List tasks from the Outlook Tasks folder.
+    """List tasks from the user's primary task list (the Outlook Tasks folder).
 
     Returns a JSON array of task summaries sorted by due date. Each task
     includes entry_id, subject, status, percent_complete, due_date,
@@ -2185,7 +2363,7 @@ async def create_task(
     reminder_minutes: int = 0,
     account: str = "",
 ) -> str:
-    """Create a new task in Outlook.
+    """Create a new task in the user's primary task list (Outlook).
 
     Args:
         subject: The task title.
@@ -2609,7 +2787,7 @@ async def get_settings() -> str:
     """Show the server's settings, where each value comes from, and which account
     tools use when none is named.
 
-    Settings: default_account, hide_accounts, open_drafts, font_family,
+    Settings: default_account, hide_accounts, open_in_outlook, font_family,
     font_size_pt, font_color, plain_text, include_shared_in_all, call_timeout_s,
     legacy_mode. Each value comes from an environment
     variable (set in Claude's config), the settings file (written by
@@ -2647,8 +2825,11 @@ async def set_setting(key: str, value: str = "", clear: bool = False) -> str:
             and the full display name is stored.
         hide_accounts: accounts to leave out of list_accounts and account="all",
             as a semicolon-separated list of display-name substrings.
-        open_drafts: "true" to open each new draft in an Outlook window,
-            "false" to only save it.
+        open_in_outlook: which saved drafts open in an Outlook window:
+            "meetings" (default: unsent meeting invitations only), "all" or
+            "none". Email drafts always land in Drafts; the open_in_outlook
+            tool opens any item on request. (open_drafts is the older
+            true/false name for the same thing.)
         font_family, font_size_pt, font_color, plain_text: how draft text is written.
         include_shared_in_all: "true" to include shared, non-cached mailboxes in
             account="all" searches (slow); default false.
@@ -2691,7 +2872,10 @@ async def set_setting(key: str, value: str = "", clear: bool = False) -> str:
                            and not any(part.strip().lower() in n for n in names)]
                 if unknown:
                     logger.warning("hide_accounts entries match no account right now: %s", unknown)
-            settings.set_value(key, value)
+            try:
+                settings.set_value(key, value)
+            except ValueError as e:
+                return json.dumps({"error": str(e), "choices": list(settings.SETTINGS[key].get("choices", []))})
         now, source = settings.get_with_source(key)
         out = {"key": key, "cleared": clear, "saved": None if clear else value, "effective": now, "source": source,
                "settings_file": str(settings.settings_path())}
@@ -2810,10 +2994,11 @@ async def contact_history(
     account: str = "all",
     include_meetings: bool = True,
 ) -> str:
-    """Everything recent with one person, in one call: when they last wrote, when
-    the user last wrote to them, the recent messages in both directions, and the
-    last and next meetings with them. Looks across every account (unless one is
-    named), the whole Inbox tree, Sent Items and every calendar.
+    """Everything recent with one person in the user's Outlook mail and calendars,
+    in one call: when they last wrote, when the user last wrote to them, the
+    recent messages in both directions, and the last and next meetings with them.
+    Looks across every account (unless one is named), the whole Inbox tree, Sent
+    Items and every calendar.
 
     This is the broadest search the server offers. Use it for one specific
     person once you know who they are, not as the first move for "find the
@@ -3018,7 +3203,6 @@ async def update_draft(
     bcc: str = "",
     account: str = "",
     replace_body: bool = False,
-    open_in_outlook: bool | None = None,
 ) -> str:
     """Change an existing draft instead of creating a new one. It is NOT sent.
 
@@ -3046,14 +3230,12 @@ async def update_draft(
             or edited there in a way that lost the marker), the body cannot be
             replaced safely and the tool says so. Pass true to overwrite the
             whole body anyway (signature and quoted text are lost).
-        open_in_outlook: Optional. True also opens the draft in an Outlook
-            window. Leave unset to follow the OUTLOOK_MCP_OPEN_DRAFTS setting.
 
     Returns:
         JSON with status "draft_saved", sent=false, entry_id, folder and the
         list of fields changed.
     """
-    def _update(outlook, namespace, entry_id, body, html_body, subject, to, cc, bcc, account, replace_body, open_in_outlook):
+    def _update(outlook, namespace, entry_id, body, html_body, subject, to, cc, bcc, account, replace_body):
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
@@ -3099,12 +3281,12 @@ async def update_draft(
                 item.HTMLBody = new_html
         if not changed:
             return json.dumps({"error": "Nothing to change: give a body, subject or recipients."})
-        return _save_draft(item, "update", open_in_outlook, changed=changed,
+        return _save_draft(item, "update", changed=changed,
                            subject=str(_safe_get(lambda: item.Subject) or ""),
                            to=str(_safe_get(lambda: item.To) or ""), cc=str(_safe_get(lambda: item.CC) or ""))
 
     try:
-        return await bridge.call(_update, entry_id, body, html_body, subject, to, cc, bcc, account, replace_body, open_in_outlook)
+        return await bridge.call(_update, entry_id, body, html_body, subject, to, cc, bcc, account, replace_body)
     except Exception as e:
         return f"Error updating draft: {format_com_error(e)}"
 

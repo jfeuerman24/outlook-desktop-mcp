@@ -6,12 +6,14 @@
   Does, in order, skipping anything already done:
     1. Checks this is Windows and that classic Outlook is installed.
     2. Finds Python 3.12 or newer. If there is none, installs it with winget.
-    3. Creates .venv next to this script and installs the server and its libraries into it
+    3. Looks for Git, which later updates (git pull) need. If there is none, installs it
+       with winget; the install itself does not need it.
+    4. Creates .venv next to this script and installs the server and its libraries into it
        (re-running adds any library a newer version of the server needs).
-    4. Adds the server to Claude's settings file (%APPDATA%\Claude\claude_desktop_config.json),
+    5. Adds the server to Claude's settings file (%APPDATA%\Claude\claude_desktop_config.json),
        keeping everything already in that file and saving a backup first.
   Nothing here sends mail, touches the mailbox, or needs administrator rights
-  (winget may show one UAC prompt if Python has to be installed).
+  (winget may show one UAC prompt if Python or Git has to be installed).
 
   Safe to run again at any time.
 
@@ -169,6 +171,37 @@ if ($py) {
         Miss "Python still not found after winget. Install it from https://www.python.org/downloads/windows/ (tick 'Add python.exe to PATH'), then run this again."
         exit 1
     }
+}
+
+# ---------------------------------------------------------------- 2b. Git (for updates)
+Step "Looking for Git"
+
+$gitExe = $null
+$gitCmd = Get-Command git -ErrorAction SilentlyContinue
+if ($gitCmd) { $gitExe = $gitCmd.Source }
+if (-not $gitExe) {
+    # Just installed, or installed without PATH refreshed: look in the usual places.
+    foreach ($p in @("$env:ProgramFiles\Git\cmd\git.exe", "${env:ProgramFiles(x86)}\Git\cmd\git.exe",
+                     "$env:LOCALAPPDATA\Programs\Git\cmd\git.exe")) {
+        if ($p -and (Test-Path $p)) { $gitExe = $p; break }
+    }
+}
+if ($gitExe) {
+    Ok "Git: $gitExe"
+} elseif ($CheckOnly) {
+    Warn "Git not found. The install does not need it; updating later (git pull) does. install.ps1 will install it with winget."
+} elseif (Get-Command winget -ErrorAction SilentlyContinue) {
+    Warn "Git not found. Installing it with winget so this folder can be updated later (Windows may ask for permission once)..."
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { & winget install -e --id Git.Git --accept-source-agreements --accept-package-agreements --silent }
+    finally { $ErrorActionPreference = $prev }
+    if (Test-Path "$env:ProgramFiles\Git\cmd\git.exe") {
+        Ok "Git installed: $env:ProgramFiles\Git\cmd\git.exe (new terminals will have it on PATH)"
+    } else {
+        Warn "Git still not found. Not a problem for the install; to update later, install Git from https://git-scm.com/download/win or download the ZIP again."
+    }
+} else {
+    Warn "Git not found and winget is not available. Not a problem for the install; to update later, install Git from https://git-scm.com/download/win or download the ZIP again."
 }
 
 if ($CheckOnly) {

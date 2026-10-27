@@ -7,7 +7,7 @@
 
 This gives Claude a live, local connection to your classic Outlook. Nothing leaves your PC except
 what Claude reads into the conversation, exactly as if you had pasted it. Claude can never send
-anything: at most it writes drafts, which open in Outlook for you to check and send yourself.
+anything: at most it writes drafts, which wait in Outlook for you to check and send yourself.
 
 Allow about ten minutes. This assumes you use both Claude Code (the VS Code extension or the
 `claude` command line) and the Claude desktop app, and connects the server to each. The install
@@ -19,7 +19,7 @@ in step 1 is shared; steps 2 and 3 just tell each app where it is.
 |---|---|
 | Windows 10/11 with **classic Outlook** installed and signed in | The "New Outlook" toggle (top right of Outlook) must be **off**. The new Outlook has no automation interface. |
 | **Python 3.12 or newer** | Open PowerShell and run `python --version`. If it is missing or older, install from https://www.python.org/downloads/windows/ and tick **"Add python.exe to PATH"** in the installer. |
-| **Claude Code** and the **Claude desktop app**, signed in | Claude Code: https://claude.com/claude-code. Desktop app: https://claude.ai/download or the Microsoft Store. Local MCP servers need the **Developer** section in the app's Settings, which free plans do not have. |
+| **Claude Code** and the **Claude desktop app**, signed in | Claude Code: https://claude.com/claude-code; it needs a paid plan (Pro, Max, Team or Enterprise). Desktop app: https://claude.ai/download or the Microsoft Store. The desktop app registers local MCP servers through the **Developer** section of its Settings; if your app has no such section, this version or plan of the app does not offer them. |
 | **Git** (optional) | Only to clone. You can also download the repo as a zip from GitHub and unzip it. |
 
 ## 1. Get the code and install it (once)
@@ -78,7 +78,7 @@ window open. Your full exe path is that text plus `\outlook-desktop-mcp.exe`.
 1. Open the Claude desktop app.
 2. Click your initials (or profile picture) in the **bottom-left** corner, then **Settings**.
 3. In the left-hand list inside Settings, click **Developer**.
-   (If there is no **Developer** entry, your plan does not include local MCP servers. Stop here.)
+   (If there is no **Developer** entry, this version or plan of the app does not offer local MCP servers. Stop here.)
 4. Click **Edit Config**. A File Explorer window opens with a file called
    `claude_desktop_config.json` selected. Nothing else happens; that is expected.
 5. Right-click `claude_desktop_config.json` → **Open with** → **Notepad**.
@@ -156,8 +156,18 @@ In a new Claude conversation:
 - "What's on all my calendars Tuesday and Wednesday?"
 - "Show me emails from Jordan in the last two days, including subfolders."
 - "Read the newest one and give me the whole thread."
-- "Draft a reply saying I'll have the numbers by Thursday." The reply opens in Outlook; read it
-  and press Send. Claude cannot send it for you.
+- "Draft a reply saying I'll have the numbers by Thursday." Claude shows the thread context and
+  the reply in the chat first; once you agree, the reply is saved to Drafts. Open it there and
+  press Send. Claude cannot send it for you.
+- "Open that email in Outlook." The message opens in its own Outlook window.
+
+## Updating
+
+From the folder: `git pull`, then run the installer again (double-click `install.cmd`, or
+`powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1`). It adds any new library and
+leaves a working install alone. Then quit Claude from the system tray and start it again. Your
+settings live outside the folder and are not touched. If you unzipped rather than cloned,
+download the ZIP again and replace the files, keeping `.venv`.
 
 ## If something is off
 
@@ -166,7 +176,7 @@ In a new Claude conversation:
 | `python` is not recognised | Reinstall Python with "Add python.exe to PATH" ticked, or use the full path to `python.exe`. |
 | `pip install` fails on ARM64 Windows | See the README's ARM64 notes: install `pywin32 mcp` with `--only-binary=:all:` first. |
 | In Claude Code, `/mcp` shows outlook-desktop as failed | Outlook is not running, or the security prompt is waiting behind another window. To see the server's own startup message, run the exe by hand in a terminal, read what it prints, then press Ctrl+C. |
-| No **Developer** section in the desktop app's Settings | Your plan does not include local MCP servers. |
+| No **Developer** section in the desktop app's Settings | This version or plan of the app does not offer local MCP servers. |
 | **outlook-desktop** never appears in the desktop app | Usually a path typo in the config (step 3d: every backslash doubled, username correct). **Settings** → **Developer** lists the server with its status and has an **Open Logs Folder** button; read the file whose name starts with `mcp-server-outlook-desktop`. |
 | Tools appear but every call errors | Outlook is not running, "New Outlook" is on, or the security prompt is waiting behind another window. |
 | You changed the code and Claude still behaves the old way | The server starts when Claude does. Start a new Claude Code session, or quit and reopen the desktop app. |
@@ -183,12 +193,12 @@ changes nothing. Run it from the folder you installed into:
 ## Settings
 
 Most settings are changed by asking Claude: "make my work mailbox the default account", "open
-drafts in a window", "hide the club mailbox". Claude calls `set_setting`, which writes
+every draft in a window", "hide the club mailbox". Claude calls `set_setting`, which writes
 `%LOCALAPPDATA%\outlook-desktop-mcp\settings.json`; the change applies at once. The README's
 *Settings* table lists them. Each can also be set as an environment variable (for example
-`"env": { "OUTLOOK_MCP_OPEN_DRAFTS": "1" }` inside the `"outlook-desktop"` block of the desktop
-app's config, or `-e OUTLOOK_MCP_OPEN_DRAFTS=1` on the `claude mcp add` command), which then
-overrides the file.
+`"env": { "OUTLOOK_MCP_OPEN_IN_OUTLOOK": "all" }` inside the `"outlook-desktop"` block of the
+desktop app's config, or `-e OUTLOOK_MCP_OPEN_IN_OUTLOOK=all` on the `claude mcp add` command),
+which then overrides the file.
 
 ### Font
 

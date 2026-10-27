@@ -8,8 +8,9 @@
 
 Claude can look through your mail, calendars and tasks, find things, pull a whole thread
 together, and write emails, replies and meeting invitations for you. **It never sends
-anything.** Whatever it writes goes to your Drafts folder (or onto your calendar with the
-invitations unsent) and pops up in Outlook for you to read and send yourself.
+anything.** Whatever it writes goes to your Drafts folder, or onto your calendar with the
+invitations unsent, for you to read and send yourself. Unsent meetings open in an Outlook
+window so you can find them; email drafts wait quietly in Drafts.
 
 There is no Microsoft account setup, nothing for an admin to approve, and no password to hand
 over. The server talks to the Outlook program on your computer the way an add-in would, so it
@@ -23,10 +24,33 @@ has the access you already have, and only while Outlook is open.
 > (AGPL-3.0, see [LICENSE](LICENSE)). It is Windows-only and never sends; the changes are listed
 > under [What this fork changes](#what-this-fork-changes).
 
-## Getting started (Claude does the setup)
+## Getting started
 
-You need a Windows PC with **classic Outlook** signed in, and the **Claude desktop app**. Allow
-five minutes. You will not type any commands; Claude runs them and explains as it goes.
+### What you need
+
+- A Windows PC with **classic Outlook** signed in and open. The new Outlook app and Outlook on
+  the web do not work with this.
+- The **Claude desktop app**. The easiest setup is done by **Claude Code** inside the app, which
+  needs a paid plan (Pro, Max, Team or Enterprise). There is a path without Claude further down.
+- About five minutes. You will not type any commands; Claude runs them and explains as it goes.
+
+### Set up Outlook first
+
+Claude sees exactly the mailboxes that are in Outlook on this PC, so add them before you start:
+
+1. Open classic Outlook and make sure the **New Outlook** switch in its top-right corner is off.
+2. Add every mailbox you want Claude to use: **File → Add Account**, sign in, repeat.
+   Microsoft 365, Exchange, Outlook.com and Gmail or other IMAP accounts all work; each one
+   becomes an account Claude can name.
+3. Shared mailboxes you have full access to appear on their own under your work account. If one
+   is missing: **File → Account Settings → Account Settings**, select the account, then
+   **Change → More Settings → Advanced → Add**.
+4. Leave Outlook open. The connector only works while it is running.
+
+During setup Claude lists the accounts it can see. If one you expected is not there, it tells
+you how to add it.
+
+### Easiest: let Claude do it
 
 1. **Make an empty folder** for it, for example `C:\Users\<you>\outlook-desktop-mcp`
    (open your user folder in File Explorer, right-click → **New** → **Folder**). Avoid OneDrive folders.
@@ -39,17 +63,33 @@ five minutes. You will not type any commands; Claude runs them and explains as i
 
 4. Claude explains what the tool does, checks the PC, installs it, and adds it to Claude's own
    settings (keeping a backup of the old settings file). It then asks you to **quit Claude from
-   the system tray and open it again** — that is the only thing you do yourself. Come back to
+   the system tray and open it again**. That is the only thing you do yourself. Come back to
    the folder and say **"test it"**.
 
 The first time Claude touches Outlook, Outlook asks whether to allow it. Tick **Allow access
 for**, pick **10 minutes**, and carry on; see [the security prompt](#outlook-programmatic-access-security-prompts)
 for the permanent options.
 
+**Updating** works the same way: open the folder in Claude Code and say **"update it"**. Claude
+pulls the latest version, runs the installer again and asks you to restart Claude.
+
 Already downloaded the ZIP from GitHub? Unzip it, open that folder with Claude Code, and say
-**"let's get started"**. Prefer to do it by hand, or want it in Claude Code's terminal? See
-[SETUP.md](SETUP.md). You can also double-click `install.cmd` in the folder, which does the
-install and the settings change without Claude.
+**"let's get started"**.
+
+### Without Claude
+
+No Claude subscription is needed for this path; the server registers itself with whichever
+Claude desktop app is installed.
+
+- **Install:** download the repository as a ZIP from GitHub (or clone it), unzip it into a folder
+  outside OneDrive, and double-click `install.cmd`. It checks the PC, installs the server and
+  adds it to the Claude desktop app's settings. Then quit Claude from the system tray, make sure
+  Outlook is open, and start Claude again.
+- **Update:** pull the latest version with VS Code's Source Control view, GitHub Desktop or
+  `git pull` (if you unzipped, download the ZIP again and replace the files, keeping `.venv`),
+  then double-click `install.cmd` again and restart Claude.
+
+Prefer to do each step by hand, or want it in Claude Code's terminal? See [SETUP.md](SETUP.md).
 
 ### Uninstall
 
@@ -63,7 +103,8 @@ restart Claude, and delete the folder.
 | **Never sends.** Upstream's `send_email`, `reply_email` and `create_meeting` are replaced by `draft_email`, `draft_reply`, `draft_forward` and `draft_meeting`, which save the item for you to send. `respond_to_meeting` is gone and `delete_event` refuses meetings you organised, because both would send a message. | `server.py` |
 | **Windows only.** The macOS/AppleScript server was removed. | `entrypoint.py` |
 | **Claude installs and explains it.** `CLAUDE.md` is the guide Claude follows; `install.ps1` / `install.cmd` do the install and register the server with the desktop app, including the Microsoft Store build. | `CLAUDE.md`, `install.ps1`, `scripts/` |
-| **Drafts are written in the chat first.** The draft tools tell Claude to show the full draft and ask before putting it in Outlook; drafts are single-spaced in Aptos 12 pt with your signature, and saved quietly to Drafts unless you turn the window on. | `server.py`, `utils/html.py` |
+| **Drafts are written in the chat first.** The draft tools tell Claude to show the full draft and ask before putting it in Outlook; drafts are single-spaced in Aptos 12 pt with your signature. Email drafts are saved quietly to Drafts; unsent meetings open in an Outlook window (the `open_in_outlook` setting). | `server.py`, `utils/html.py` |
+| **Thread context before a reply.** `reply_context` returns the recipients Outlook's own Reply would address, who is on the thread and a digest of it, so the chat preview starts with context. Every message carries `thread_depth`. `open_in_outlook` opens any item in Outlook on request. | `server.py`, `tools/conversation.py` |
 | **Settings by conversation.** `set_setting` / `get_settings` for the default account, hidden accounts, draft window and font, stored outside the repo. | `utils/settings.py` |
 | **Attachments read in place, files attached from disk.** `read_attachment` (PDF, Word, Excel, PowerPoint, CSV, text, .msg), `add_attachment`, and an `attachments` argument on every draft tool. | `utils/extract.py`, `server.py` |
 | **Fast searches.** Outlook does the filtering (sender, recipient, subject, date) instead of Python walking messages, so a sender search of an 11,000-message inbox takes a second and sees every message. Shared mailboxes that are not cached locally are skipped by `account="all"`. Long searches return partial results before the time limit instead of an error. `legacy_mode` runs the old paths. | `utils/dasl.py`, `utils/deadline.py`, `com_bridge.py`, `server.py` |
@@ -107,9 +148,11 @@ You have three options:
 | Tool | Description |
 |------|-------------|
 | `list_emails` | List recent emails from any folder, with optional unread, date, sender and subfolder filters; `account="all"` for every mailbox |
-| `read_email` | Read full email content by entry ID or subject search (quoted history trimmed unless `include_history`) |
+| `read_email` | Read full email content by entry ID or subject search (quoted history trimmed unless `include_history`); `thread_depth` says how deep in a thread it sits |
 | `search_emails` | Find mail by sender (name, address or domain), subject text and date, in about a second even in a big folder; `include_body` also scans message text (slow); `account="all"` for every mailbox |
 | `get_conversation` | Every message of a thread, oldest first, each once, across folders and dates; `max_body_chars` for a cheap look at long threads |
+| `reply_context` | What a reply preview needs: the To/CC Outlook's own Reply or Reply All would use, who is on the thread, a digest of the earlier messages, the message in full. Creates nothing |
+| `open_in_outlook` | Open an email, draft, meeting, appointment or task in its own Outlook window when you ask. Changes nothing |
 | `contact_history` | One known person across every account: last received, last sent, recent messages both ways, last and next meeting. The broadest search; use after a targeted one |
 | `list_folders` | Browse the folder hierarchy with item counts |
 | `draft_email` | Write a new email to Drafts with To/CC/BCC and optional file attachments. **Not sent.** |
@@ -129,7 +172,7 @@ You have three options:
 | `get_event` | Read full event details by entry ID |
 | `search_events` | Search calendar events by keyword within a date range |
 | `create_event` | Create a personal calendar appointment (no attendees) |
-| `draft_meeting` | Put a meeting with attendees on the calendar and open it in Outlook. **Invitations not sent.** |
+| `draft_meeting` | Put a meeting with attendees on the calendar; it opens in Outlook for you to check. **Invitations not sent.** |
 | `update_event` | Change an event's subject, time, location, etc. Saved, not sent |
 | `delete_event` | Delete an appointment or a received meeting. Refuses meetings you organised |
 
@@ -171,7 +214,7 @@ You have three options:
 | `set_setting` | Change a setting by asking Claude (default account, hidden accounts, draft window, font); takes effect at once |
 | `health_check` | Server version, Outlook running, accounts loaded, settings, and whether Outlook's permission prompt is blocking |
 
-**Total: 39 tools.**
+**Total: 41 tools.**
 
 ### Nothing sends
 
@@ -182,13 +225,26 @@ The four tools that would normally send instead save and hand over to you:
 - `draft_forward` builds Outlook's own forward (FW: subject, header block, quoted message, attachments) and puts your note above it.
 - `draft_meeting` puts the meeting on your calendar with the attendees filled in and the invitations unsent.
 
-Each one saves the item so you can open it, read it and press **Send**; with
-`OUTLOOK_MCP_OPEN_DRAFTS=1` (or `open_in_outlook=true` on a call) it opens in an Outlook window at once. The tool result says `"status": "draft_saved"`
-and `"sent": false`, with the entry ID and the folder, so Claude can tell you where it is.
-Drafts get your normal signature and the font described below.
+Each one saves the item so you can open it, read it and press **Send**. By default an unsent
+meeting opens in an Outlook window at once, so it is not lost on the calendar, and an email draft
+waits in Drafts without a window; the `open_in_outlook` setting (`none`, `meetings`, `all`)
+changes that, and asking Claude to "open it in Outlook" opens any item. The tool result says
+`"status": "draft_saved"` and `"sent": false`, with the entry ID and the folder, so Claude can
+tell you where it is. Drafts get your normal signature and the font described below.
 
 Deliberately missing: there is no tool to send, to accept or decline an invitation, or to
 cancel a meeting you organised, because every one of those sends a message. Do those in Outlook.
+
+### Context before a reply
+
+You will often ask for a reply to an email you have not opened. Before showing a reply or
+forward draft, Claude calls `reply_context`, which returns the recipients Outlook's own Reply or
+Reply All would address, who is on the thread, a short digest of the earlier messages and the
+message being answered in full, without creating anything. The draft preview in the chat then
+starts with a few lines of context. Every message also carries `thread_depth` (0 for the first
+message of a thread, 1 for a reply to it, and so on), so Claude can tell when there is history
+it has not read. "Open that email in Outlook" (`open_in_outlook`) shows it in Outlook's own
+window, thread and all.
 
 ### Searching quickly
 
@@ -235,7 +291,7 @@ Claude's config, which then overrides the file.
 |---|---|---|---|
 | `default_account` | `OUTLOOK_MCP_DEFAULT_ACCOUNT` | Outlook's default mailbox | Account used when a request does not name one |
 | `hide_accounts` | `OUTLOOK_MCP_HIDE_ACCOUNTS` | none | Mailboxes (name substrings, `;`-separated) left out of `list_accounts` and `account="all"`; still reachable by name |
-| `open_drafts` | `OUTLOOK_MCP_OPEN_DRAFTS` | off | Open each new draft in an Outlook window instead of only saving it. A single call can still say `open_in_outlook=true/false` |
+| `open_in_outlook` | `OUTLOOK_MCP_OPEN_IN_OUTLOOK` | `meetings` | Which saved drafts open in an Outlook window: `meetings` (unsent invitations only), `all`, or `none`. `open_drafts` (true/false) is the older name and still works until this one is set |
 | `font_family`, `font_size_pt`, `font_color` | `OUTLOOK_MCP_FONT_*` | Aptos, 12, black | Font for the text the server writes into drafts |
 | `plain_text` | `OUTLOOK_MCP_PLAIN_TEXT` | off | Write drafts as plain text instead of styled HTML |
 | `include_shared_in_all` | `OUTLOOK_MCP_INCLUDE_SHARED_IN_ALL` | off | Include shared, non-cached mailboxes in `account="all"` searches (slow) |
@@ -332,8 +388,9 @@ Once registered, just talk to Claude naturally:
 - *"Read the email from Taylor about MLADS and give me the whole thread"*
 - *"What's on all my calendars this week?"*
 - *"Save the attachment from that email to my Downloads folder"*
-- *"Draft a reply to Taylor saying I can do Thursday"* — the reply is saved to Drafts; you press Send
+- *"Draft a reply to Taylor saying I can do Thursday"* — Claude first shows a few lines about the thread and the recipients Outlook would use, then the reply; it is saved to Drafts and you press Send
 - *"Change that draft to say Friday instead"* — the same draft is updated, not a second one
+- *"Open that email in Outlook"* — the message opens in Outlook's own window
 - *"Is the Outlook connector working?"* — `health_check`
 - *"Draft an email to alice@example.com about the project update"*
 - *"Set up a 30-minute meeting with bob@example.com tomorrow at 2pm"* — the invitation is on your calendar, unsent; you press Send
@@ -360,12 +417,12 @@ Once registered, just talk to Claude naturally:
 outlook-desktop-mcp/
   src/outlook_desktop_mcp/
     entrypoint.py            # Windows check → server
-    server.py                # The MCP server (39 tools, COM automation, drafts only)
+    server.py                # The MCP server (41 tools, COM automation, drafts only)
     com_bridge.py            # Async-to-COM threading bridge
     tools/
       _folder_constants.py   # Outlook enums and constants
       calendars.py           # Every calendar folder in a store; calendar argument resolution
-      conversation.py        # Conversation tree walk + ConversationTopic fallback
+      conversation.py        # Conversation tree walk + ConversationTopic fallback; thread depth
     utils/
       formatting.py          # Email/event/task data extraction
       text.py                # Quoted-history trimming, external-sender banner removal (pure)
@@ -386,6 +443,7 @@ outlook-desktop-mcp/
     test_dasl.py             # unit: filter builders (no Outlook)
     test_deadline.py         # unit: deadlines and bridge request bookkeeping (no Outlook)
     test_calendars.py        # unit: calendar discovery cache with a fake store (no Outlook)
+    test_conversation.py     # unit: thread depth from ConversationIndex (no Outlook)
     live_check.py            # live: the fork's additions over stdio, reads only, changes nothing
     perf_check.py            # live: times the searches that used to be slow, reads only
     phase1_com_test.py       # Email COM validation (writes a draft, sends nothing)
@@ -395,7 +453,7 @@ outlook-desktop-mcp/
     extras_com_test.py       # Tasks/attachments/categories/rules/OOF COM test
     extras_mcp_test.py       # Tasks/attachments/categories/rules/OOF MCP test
   CLAUDE.md                 # Guide Claude follows to install and explain the tool for a new user
-  install.ps1               # Checks the PC, installs Python if needed, builds .venv, registers with Claude
+  install.ps1               # Checks the PC, installs Python and Git if needed, builds .venv, registers with Claude
   install.cmd               # Double-click wrapper for install.ps1
   scripts/
     configure_claude_desktop.py  # Adds/removes the server in claude_desktop_config.json, with backup

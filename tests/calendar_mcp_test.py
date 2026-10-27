@@ -136,7 +136,6 @@ async def run_tests():
                     "required_attendees": "user@example.com",
                     "location": "Virtual via MCP",
                     "body": "Meeting prepared through MCP calendar tools.",
-                    "open_in_outlook": False,
                 })
                 content = result.content[0].text
                 log(f"  Result: {content}")

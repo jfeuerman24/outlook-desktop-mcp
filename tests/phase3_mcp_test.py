@@ -142,7 +142,6 @@ async def run_tests():
                     "to": "user@example.com",
                     "subject": "Outlook Desktop MCP - Phase 3 MCP Test",
                     "body": "Written through the MCP server via stdio. This should sit in Drafts, unsent.",
-                    "open_in_outlook": False,
                 })
                 content = result.content[0].text
                 log(f"  Result: {content}")

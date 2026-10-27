@@ -9,7 +9,8 @@ restarts and ``git pull``. The file lives outside the repo:
 
 Values are read on every lookup (the file is re-read when its mtime changes), so a
 change takes effect immediately in the running server. An environment variable always
-wins over the file; ``get_with_source`` says which one applied.
+wins over the file; ``get_with_source`` says which one applied. ``open_in_outlook_mode``
+and ``should_open`` resolve which saved drafts open in an Outlook window.
 """
 from __future__ import annotations
 
@@ -32,9 +33,17 @@ SETTINGS: dict[str, dict] = {
         "help": "Accounts (display name substrings, semicolon-separated) left out of list_accounts "
                 "and of account=\"all\" searches. They can still be named explicitly.",
     },
+    "open_in_outlook": {
+        "env": "OUTLOOK_MCP_OPEN_IN_OUTLOOK", "type": "choice", "choices": ("none", "meetings", "all"),
+        "default": "meetings",
+        "help": "Which saved drafts open in an Outlook window: 'meetings' (default) opens unsent meeting "
+                "invitations only, so they are not lost on the calendar; 'all' opens every draft; 'none' "
+                "opens nothing. Email drafts always land in Drafts. The open_in_outlook tool opens any "
+                "item on request.",
+    },
     "open_drafts": {
         "env": "OUTLOOK_MCP_OPEN_DRAFTS", "type": "bool", "default": False,
-        "help": "Open each new draft in an Outlook window. Off = just save it to Drafts.",
+        "help": "Older name for open_in_outlook: true = all, false = none. Ignored when open_in_outlook is set.",
     },
     "font_family": {"env": "OUTLOOK_MCP_FONT_FAMILY", "type": "str", "default": "Aptos",
                     "help": "Font for text the server writes into drafts."},
@@ -74,8 +83,22 @@ def settings_path() -> pathlib.Path:
     return pathlib.Path(base) / "outlook-desktop-mcp" / "settings.json"
 
 
-def _coerce(key: str, raw: Any) -> Any:
-    kind = SETTINGS[key]["type"]
+def _coerce(key: str, raw: Any, strict: bool = False) -> Any:
+    """Turn a raw env, file or user value into the setting's type.
+
+    ``strict`` (used when the user sets a value) raises ValueError for a choice outside
+    the allowed set; otherwise an unknown choice falls back to the default, so a stale
+    file or env var cannot break every lookup.
+    """
+    spec = SETTINGS[key]
+    kind = spec["type"]
+    if kind == "choice":
+        text = str(raw or "").strip().lower()
+        if text in spec["choices"]:
+            return text
+        if strict:
+            raise ValueError(f"{key} must be one of {', '.join(spec['choices'])}; got {raw!r}")
+        return spec["default"]
     if kind == "bool":
         if isinstance(raw, bool):
             return raw
@@ -144,7 +167,7 @@ def set_value(key: str, value: Any) -> Any:
     """Write one setting to the file (creating it) and return the coerced value."""
     if key not in SETTINGS:
         raise KeyError(f"Unknown setting {key!r}. Known: {', '.join(SETTINGS)}")
-    coerced = _coerce(key, value)
+    coerced = _coerce(key, value, strict=True)
     path = settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     data = dict(_file_data())
@@ -170,3 +193,30 @@ def clear_value(key: str) -> None:
         os.replace(tmp, path)
     with _lock:
         _cache.update(path=path, mtime=None, data={})
+
+
+def open_in_outlook_mode() -> str:
+    """``"none"``, ``"meetings"`` or ``"all"``: which saved drafts open in an Outlook window.
+
+    ``open_in_outlook`` wins when it is set (env or file). Otherwise the older
+    ``open_drafts`` boolean maps to ``all`` / ``none`` so existing installs keep behaving.
+    Otherwise the default, ``meetings``.
+    """
+    value, source = get_with_source("open_in_outlook")
+    if source != "default":
+        return value
+    legacy, legacy_source = get_with_source("open_drafts")
+    if legacy_source != "default":
+        return "all" if legacy else "none"
+    return value
+
+
+def should_open(kind: str) -> bool:
+    """Whether a draft of ``kind`` ("email", "reply", "reply_all", "forward", "update",
+    "meeting") opens in an Outlook window after it is saved."""
+    mode = open_in_outlook_mode()
+    if mode == "all":
+        return True
+    if mode == "meetings":
+        return kind == "meeting"
+    return False

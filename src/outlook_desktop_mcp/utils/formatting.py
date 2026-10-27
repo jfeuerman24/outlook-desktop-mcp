@@ -13,6 +13,7 @@ from outlook_desktop_mcp.tools._folder_constants import (
     TASK_STATUS_NAMES,
     IMPORTANCE_NAMES,
 )
+from outlook_desktop_mcp.tools.conversation import thread_depth
 from outlook_desktop_mcp.utils.addresses import format_recipients, get_smtp
 from outlook_desktop_mcp.utils.dates import iso, iso_date
 from outlook_desktop_mcp.utils.text import clean_body
@@ -60,6 +61,7 @@ def format_email_summary(item) -> dict:
         "has_attachments": bool(item.Attachments.Count > 0),
         "attachment_count": item.Attachments.Count,
         "conversation_id": str(_safe(lambda: item.ConversationID)),
+        "thread_depth": thread_depth(_safe(lambda: item.ConversationIndex, None)),
     }
 
 

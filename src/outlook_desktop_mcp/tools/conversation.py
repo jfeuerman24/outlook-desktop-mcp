@@ -46,6 +46,31 @@ def message_id(item) -> str:
         return ""
 
 
+_ROOT_INDEX_CHARS = 44   # 22-byte conversation index header, as hex
+_LEVEL_INDEX_CHARS = 10  # 5 bytes per reply level, as hex
+
+
+def thread_depth(conversation_index) -> int | None:
+    """0 for the first message of a thread, 1 for a reply to it, 2 for a reply to that,
+    and so on; None when it cannot be told.
+
+    Outlook's ``ConversationIndex`` is a hex string: a 22-byte header for the root message
+    plus 5 bytes for every reply level. Reading it costs nothing, unlike walking the
+    conversation, so every message record can say how deep in a thread it sits.
+    """
+    try:
+        text = str(conversation_index or "").strip()
+    except Exception:
+        return None
+    if len(text) < _ROOT_INDEX_CHARS or (len(text) - _ROOT_INDEX_CHARS) % _LEVEL_INDEX_CHARS:
+        return None
+    try:
+        int(text, 16)
+    except ValueError:
+        return None
+    return (len(text) - _ROOT_INDEX_CHARS) // _LEVEL_INDEX_CHARS
+
+
 def walk_conversation(item) -> list | None:
     """Mail items reachable from ``item.GetConversation()``; None when unavailable."""
     try:

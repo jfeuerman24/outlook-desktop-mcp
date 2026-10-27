@@ -3,6 +3,36 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## 0.7.0 - 2026-10-27
+
+### Added
+- **`reply_context`**: before a reply or forward draft is shown in the chat, one call returns
+  the recipients Outlook's own Reply or Reply All would address, who is on the thread, a digest
+  of the earlier messages and the message being answered in full. Nothing is created or saved.
+  The server instructions and the draft tools now ask for a short Context block above every
+  reply preview, because the user often has not opened the email in Outlook.
+- **`thread_depth`** on every email record: 0 for the first message of a thread, 1 for a reply
+  to it, and so on, read from Outlook's ConversationIndex at no cost.
+- **`open_in_outlook`** tool: opens any item (email, draft, unsent meeting, appointment, task)
+  in an Outlook window when the user asks. Changes nothing.
+- `install.ps1` looks for Git and installs it with winget when missing, so the folder can be
+  updated with `git pull` later. CLAUDE.md has an "update it" procedure; the README says how to
+  update with or without Claude.
+
+### Changed
+- **Meetings open, emails do not.** The `open_drafts` boolean is replaced by `open_in_outlook`
+  with `none`, `meetings` (default) or `all`. An unsent meeting opens in an Outlook window so it
+  is not lost on the calendar; an email draft waits in Drafts. `open_drafts` still works as the
+  older name until `open_in_outlook` is set. The per-call `open_in_outlook` argument is gone
+  from the draft tools (Claude kept setting it); the tool of the same name covers "open it for me".
+- README: what you need (classic Outlook with your accounts added; the Claude desktop app, with
+  a paid plan for the guided setup), how to add mailboxes to Outlook first, a path without
+  Claude, and how to update. SETUP.md no longer claims free plans lack local servers.
+  CONTRIBUTING.md describes this fork rather than upstream's release flow.
+- The server instructions and the mail, calendar and task entry-point tools now say this is
+  the user's primary mailbox and calendar, so Claude Desktop reaches for Outlook rather than a
+  Gmail or Google Calendar connector when the request does not name a service.
+
 ## 0.6.0 - 2026-10-27
 
 Searching is now fast. Measured on a profile with five accounts, one of them an 11,000-message

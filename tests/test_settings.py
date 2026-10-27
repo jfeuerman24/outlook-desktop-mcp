@@ -25,8 +25,36 @@ class SettingsTests(unittest.TestCase):
     def test_defaults_when_nothing_set(self):
         self.assertEqual(settings.get_with_source("default_account"), ("", "default"))
         self.assertEqual(settings.get_with_source("open_drafts"), (False, "default"))
+        self.assertEqual(settings.get_with_source("open_in_outlook"), ("meetings", "default"))
         self.assertEqual(settings.get("hide_accounts"), [])
         self.assertEqual(settings.get("font_family"), "Aptos")
+
+    def test_open_in_outlook_default_opens_meetings_only(self):
+        self.assertEqual(settings.open_in_outlook_mode(), "meetings")
+        self.assertTrue(settings.should_open("meeting"))
+        for kind in ("email", "reply", "reply_all", "forward", "update"):
+            self.assertFalse(settings.should_open(kind), kind)
+
+    def test_open_in_outlook_is_a_validated_choice(self):
+        self.assertEqual(settings.set_value("open_in_outlook", " ALL "), "all")
+        self.assertTrue(settings.should_open("email"))
+        self.assertEqual(settings.set_value("open_in_outlook", "none"), "none")
+        self.assertFalse(settings.should_open("meeting"))
+        with self.assertRaises(ValueError):
+            settings.set_value("open_in_outlook", "sometimes")
+        # A bad value already in the env or file falls back to the default instead of breaking lookups.
+        with mock.patch.dict(os.environ, {"OUTLOOK_MCP_OPEN_IN_OUTLOOK": "bogus"}):
+            self.assertEqual(settings.get("open_in_outlook"), "meetings")
+
+    def test_legacy_open_drafts_still_honoured_until_the_new_setting_is_set(self):
+        settings.set_value("open_drafts", "true")
+        self.assertEqual(settings.open_in_outlook_mode(), "all")
+        settings.set_value("open_drafts", "false")
+        self.assertEqual(settings.open_in_outlook_mode(), "none")
+        settings.set_value("open_in_outlook", "meetings")
+        self.assertEqual(settings.open_in_outlook_mode(), "meetings")
+        with mock.patch.dict(os.environ, {"OUTLOOK_MCP_OPEN_DRAFTS": "1"}):
+            self.assertEqual(settings.open_in_outlook_mode(), "meetings")
 
     def test_set_value_writes_file_and_applies_immediately(self):
         self.assertEqual(settings.set_value("default_account", "Jake@heartland-gp.com"), "Jake@heartland-gp.com")
@@ -69,6 +97,7 @@ class SettingsTests(unittest.TestCase):
         info = settings.all_settings()
         self.assertEqual(set(info), set(settings.SETTINGS))
         self.assertEqual(info["open_drafts"]["env_var"], "OUTLOOK_MCP_OPEN_DRAFTS")
+        self.assertEqual(info["open_in_outlook"]["env_var"], "OUTLOOK_MCP_OPEN_IN_OUTLOOK")
         self.assertIn("source", info["default_account"])
 
 

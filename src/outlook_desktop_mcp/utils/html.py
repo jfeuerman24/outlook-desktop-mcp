@@ -9,9 +9,9 @@ Override with the settings file (``set_setting``) or environment variables:
     OUTLOOK_MCP_FONT_SIZE_PT  (default "12")
     OUTLOOK_MCP_FONT_COLOR    (default "#000000")
     OUTLOOK_MCP_PLAIN_TEXT=1  write plain text instead of styled HTML
-    OUTLOOK_MCP_OPEN_DRAFTS=1 open each new draft in an Outlook window (default: just
-                              save it to Drafts; the per-call open_in_outlook flag
-                              still overrides either way)
+
+Whether a saved draft opens in an Outlook window is the ``open_in_outlook`` setting
+(``settings.should_open``), not something this module decides.
 
 Paragraphs are wrapped as ``<p style=…><span style=…>`` because Outlook's Word renderer
 ignores inherited font on a bare container; this mirrors what Outlook itself writes.
@@ -32,11 +32,6 @@ _BODY_OPEN = re.compile(r"<body\b[^>]*>", re.I)
 
 def plain_text_mode() -> bool:
     return bool(settings.get("plain_text"))
-
-
-def open_drafts_default() -> bool:
-    """Whether draft_* tools open the saved item in an Outlook window when not told."""
-    return bool(settings.get("open_drafts"))
 
 
 def font_style() -> str:
