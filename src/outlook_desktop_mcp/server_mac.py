@@ -37,6 +37,10 @@ logger = logging.getLogger("outlook_desktop_mcp")
 
 # --- MCP Server ---
 
+from outlook_desktop_mcp.readonly import is_read_only
+
+READ_ONLY = is_read_only()
+
 mcp = FastMCP(
     "outlook-desktop-mcp",
     instructions=(
@@ -217,7 +221,14 @@ async def _ui_list_messages(bridge_obj, count: int = 10) -> list[dict]:
 # TOOL 1: send_email
 # =====================================================================
 
-@mcp.tool()
+def write_tool():
+    """Register a tool only when the server is not read-only (see readonly.py)."""
+    if READ_ONLY:
+        return lambda func: func
+    return mcp.tool()
+
+
+@write_tool()
 async def send_email(
     to: str,
     subject: str,
@@ -520,7 +531,7 @@ end tell'''
 # TOOL 4: mark_as_read
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def mark_as_read(entry_id: str) -> str:
     """Mark a specific email as read in Outlook.
 
@@ -551,7 +562,7 @@ end tell'''
 # TOOL 5: mark_as_unread
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def mark_as_unread(entry_id: str) -> str:
     """Mark a specific email as unread in Outlook.
 
@@ -582,7 +593,7 @@ end tell'''
 # TOOL 6: move_email
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def move_email(
     entry_id: str,
     target_folder: str = "archive",
@@ -621,7 +632,7 @@ end tell'''
 # TOOL 7: reply_email
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def reply_email(
     entry_id: str,
     body: str,
@@ -965,7 +976,7 @@ end tell'''
 # TOOL 12: create_event
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def create_event(
     subject: str,
     start: str,
@@ -1030,7 +1041,7 @@ end tell'''
 # TOOL 13: create_meeting
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def create_meeting(
     subject: str,
     start: str,
@@ -1097,7 +1108,7 @@ end tell'''
 # TOOL 14: update_event
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def update_event(
     entry_id: str,
     subject: str = "",
@@ -1165,7 +1176,7 @@ end tell'''
 # TOOL 15: delete_event
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def delete_event(entry_id: str) -> str:
     """Delete a calendar event.
 
@@ -1394,7 +1405,7 @@ end tell'''
         return f"Error reading task: {e}"
 
 
-@mcp.tool()
+@write_tool()
 async def create_task(
     subject: str,
     body: str = "",
@@ -1441,7 +1452,7 @@ end tell'''
         return f"Error creating task: {e}"
 
 
-@mcp.tool()
+@write_tool()
 async def complete_task(entry_id: str) -> str:
     """Mark a task as complete.
 
@@ -1466,7 +1477,7 @@ end tell'''
         return f"Error completing task: {e}"
 
 
-@mcp.tool()
+@write_tool()
 async def delete_task(entry_id: str) -> str:
     """Delete a task from Outlook.
 

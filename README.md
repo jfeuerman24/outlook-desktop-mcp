@@ -8,21 +8,62 @@
 
 Any MCP client (Claude Code, Claude Desktop, etc.) can then send emails, manage your calendar, create tasks, handle attachments, and more — all through your existing Outlook session.
 
+> **New here? Follow [SETUP.md](SETUP.md)** — step-by-step instructions for the Claude desktop app
+> and Claude Code, including the Outlook security prompt.
+>
+> **This is a fork** of [Aanerud/outlook-desktop-mcp](https://github.com/Aanerud/outlook-desktop-mcp)
+> (AGPL-3.0, see [LICENSE](LICENSE)). It adds the changes below; everything else is the upstream project.
+
+## What this fork adds
+
+| Change | Where |
+|---|---|
+| **Read-only mode.** `outlook-desktop-mcp --read-only` (or `OUTLOOK_MCP_READ_ONLY=1`) registers only tools that read. Send, reply, move, mark, create, update, delete, respond, complete and toggle tools are not exposed at all, so a prompt (or a malicious email) cannot make the client act on your mailbox. Works on Windows and macOS. | `readonly.py`, `entrypoint.py` |
+| **Every calendar, not just the default.** New `list_calendars` tool; `list_events` and `search_events` take `calendar` (`""` = main Calendar, `"all"` = every calendar in the account, or a name/path such as `Calendar/Family`). Each event says which calendar it came from. | `tools/calendars.py` |
+| **Thread reconstruction.** New `get_conversation` tool walks Outlook's conversation across folders and dates, deduped by Message-ID, oldest first, with a ConversationTopic fallback. | `tools/conversation.py` |
+| **Quoted history trimmed before the length cap.** `read_email` returns the message's own text (`body_trimmed` says if anything was cut); `include_history=true` gives the raw body. Outlook's "You don't often get email from…" banner is removed. | `utils/text.py` |
+| **Sender filter and subtree search.** `list_emails` and `search_emails` take `sender` (substring of address or name) and `include_subfolders`. `search_emails` may be called with just a sender. | `server.py` |
+| **Exchange addresses resolved to SMTP.** `sender` is a real address instead of `/o=ExchangeLabs/…`; full reads include `recipients` with resolved addresses. | `utils/addresses.py` |
+| **ISO 8601 dates with the local UTC offset** everywhere (`2026-10-26T17:40:00-04:00`); Outlook's "no date" becomes `null`. Events that started before the range but overlap it are included. | `utils/dates.py` |
+| **Outgoing mail in a fixed font.** `send_email` and `reply_email` write HTML in Aptos 12 pt black (overridable with `OUTLOOK_MCP_FONT_*`, or `OUTLOOK_MCP_PLAIN_TEXT=1`); replies are injected above Outlook's quoted history instead of replacing it with plain text. | `utils/html.py` |
+| **Offline unit tests** (`python -m unittest discover -s tests`) and a GitHub Actions workflow that runs them. PyPI publishing is manual in this fork. | `tests/test_*.py` |
+
 ## Quick Start
 
-**1. Install** (requires Python 3.12+):
+**1. Install** (requires Python 3.12+). From this fork:
 
 ```bash
-pip install outlook-desktop-mcp
+git clone https://github.com/jfeuerman24/outlook-desktop-mcp.git
+cd outlook-desktop-mcp
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e .
 ```
+
+(The upstream release is `pip install outlook-desktop-mcp`; it does not include this fork's changes.)
 
 **2. Register with Claude Code:**
 
 ```bash
-claude mcp add outlook-desktop -- outlook-desktop-mcp
+claude mcp add outlook-desktop -- C:\path\to\outlook-desktop-mcp\.venv\Scripts\outlook-desktop-mcp.exe --read-only
 ```
 
-**3. Open Outlook and start a Claude Code session.** That's it — tools are available immediately.
+Drop `--read-only` if you want Claude to be able to send, move and create things.
+
+**Or register with Claude Desktop:** Settings → Developer → Edit Config, then add to `claude_desktop_config.json` (use the full path; Claude Desktop starts servers with a minimal PATH):
+
+```json
+{
+  "mcpServers": {
+    "outlook-desktop": {
+      "command": "C:\\path\\to\\outlook-desktop-mcp\\.venv\\Scripts\\outlook-desktop-mcp.exe",
+      "args": ["--read-only"]
+    }
+  }
+}
+```
+
+**3. Open Outlook and start a Claude session.** That's it — tools are available immediately.
 
 ## How It Works — Platform Routing
 
@@ -114,9 +155,10 @@ Both permissions are one-time setup — macOS remembers them for future sessions
 | Tool | Windows | macOS | Description |
 |------|:-------:|:-----:|-------------|
 | `send_email` | yes | yes | Send an email with To/CC/BCC, plain text or HTML body |
-| `list_emails` | yes | yes | List recent emails from any folder, with optional unread filter |
-| `read_email` | yes | yes | Read full email content by entry ID or subject search |
-| `search_emails` | yes | yes | Full-text search across email subjects and bodies |
+| `list_emails` | yes | yes | List recent emails from any folder, with optional unread, date, sender and subfolder filters |
+| `read_email` | yes | yes | Read full email content by entry ID or subject search (quoted history trimmed unless `include_history`) |
+| `search_emails` | yes | yes | Full-text search across email subjects and bodies, optionally by sender and across subfolders |
+| `get_conversation` | yes | — | Every message of a thread, oldest first, each once, across folders and dates |
 | `reply_email` | yes | yes | Reply or reply-all, preserving the conversation thread |
 | `mark_as_read` | yes | yes | Mark a specific email as read |
 | `mark_as_unread` | yes | yes | Mark a specific email as unread |
@@ -127,7 +169,8 @@ Both permissions are one-time setup — macOS remembers them for future sessions
 
 | Tool | Windows | macOS | Description |
 |------|:-------:|:-----:|-------------|
-| `list_events` | yes | yes | List upcoming events within a date range |
+| `list_calendars` | yes | — | List every calendar folder in an account (Birthdays, holidays, shared, subscribed) |
+| `list_events` | yes | yes | List events within a date range, from one calendar or `calendar="all"` |
 | `get_event` | yes | yes | Read full event details by entry ID |
 | `create_event` | yes | yes | Create a personal calendar appointment |
 | `create_meeting` | yes | yes | Create a meeting and send invitations to attendees |
@@ -165,7 +208,32 @@ These tools rely on COM-specific APIs (MAPI property accessors, the Rules object
 | `toggle_rule` | yes | — | Enable or disable a mail rule by name |
 | `get_out_of_office` | yes | — | Check whether Out of Office auto-reply is on or off |
 
-**Total: 29 tools on Windows, 22 tools on macOS.**
+**Total: 31 tools on Windows, 22 tools on macOS.** In `--read-only` mode: 17 on Windows, 10 on macOS.
+
+### Read-only mode
+
+```bash
+outlook-desktop-mcp --read-only
+```
+
+or set `OUTLOOK_MCP_READ_ONLY=1`. The server then registers only: `list_accounts`, `list_emails`,
+`read_email`, `search_emails`, `get_conversation`, `list_folders`, `list_calendars`, `list_events`,
+`get_event`, `search_events`, `list_tasks`, `get_task`, `list_attachments`, `save_attachment`
+(writes to disk, never to the mailbox), `list_categories`, `list_rules`, `get_out_of_office`.
+The write tools are not merely refused — they are never registered, so the client does not see them.
+
+### Working with several calendars
+
+```
+list_calendars account="personal"
+→ Calendar (default), Calendar/Birthdays, Calendar/United States holidays, Calendar/Kate Work
+
+list_events start_date="2026-10-27" end_date="2026-10-29" calendar="all" account="personal"
+→ events from all four, each tagged with its calendar, sorted by start
+```
+
+To check availability across accounts, call `list_events` with `calendar="all"` once per account and
+compare the results.
 
 ## Architecture Details
 
@@ -299,20 +367,30 @@ Windows-only examples:
 ```
 outlook-desktop-mcp/
   src/outlook_desktop_mcp/
-    entrypoint.py            # Platform detection → routes to correct server
-    server.py                # Windows MCP server (29 tools, COM automation)
+    entrypoint.py            # Platform detection + --read-only flag → routes to correct server
+    readonly.py              # Read-only switch and the list of write tools
+    server.py                # Windows MCP server (31 tools, COM automation)
     server_mac.py            # macOS MCP server (22 tools, AppleScript)
     com_bridge.py            # Async-to-COM threading bridge (Windows)
     applescript_bridge.py    # Async osascript execution (macOS)
     tools/
       _folder_constants.py   # Outlook enums and constants (Windows)
+      calendars.py           # Every calendar folder in a store; calendar argument resolution
+      conversation.py        # Conversation tree walk + ConversationTopic fallback
     utils/
       formatting.py          # Email/event/task data extraction (Windows)
+      text.py                # Quoted-history trimming, external-sender banner removal (pure)
+      dates.py               # pywintypes → ISO 8601 with offset (pure)
+      addresses.py           # Exchange DN → SMTP resolution, recipients
       errors.py              # COM error formatting (Windows)
       applescript_helpers.py # AppleScript escaping, date formatting (macOS)
   tests/
+    test_text.py             # unit: trimming (no Outlook)
+    test_dates.py            # unit: ISO dates (no Outlook)
+    test_readonly.py         # unit: read-only mode hides write tools (no Outlook)
+    live_readonly_check.py   # live: the fork's additions over stdio, read-only, sends nothing
     phase1_com_test.py       # Email COM validation
-    phase3_mcp_test.py       # Email MCP test
+    phase3_mcp_test.py       # Email MCP test (sends a test email)
     calendar_com_test.py     # Calendar COM validation
     calendar_mcp_test.py     # Calendar MCP test
     extras_com_test.py       # Tasks/attachments/categories/rules/OOF COM test

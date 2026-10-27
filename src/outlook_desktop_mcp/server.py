@@ -6,6 +6,8 @@ Uses COM automation — no Microsoft Graph, no Entra app registration.
 Just run this on Windows with Outlook open and you have a full email MCP server.
 
 Entry point: python -m outlook_desktop_mcp.server
+Read-only mode: OUTLOOK_MCP_READ_ONLY=1 (or `outlook-desktop-mcp --read-only`) registers
+only tools that read; nothing that can change the mailbox is exposed.
 """
 import sys
 import json
@@ -19,6 +21,11 @@ from datetime import datetime, timedelta
 
 import os
 
+from outlook_desktop_mcp.readonly import is_read_only
+from outlook_desktop_mcp.tools.calendars import describe_calendars, resolve_calendars
+from outlook_desktop_mcp.tools.conversation import conversation_items
+from outlook_desktop_mcp.utils.addresses import get_smtp, sender_matches
+from outlook_desktop_mcp.utils.html import inject_into_body, plain_text_mode, style_html, text_to_html
 from outlook_desktop_mcp.tools._folder_constants import (
     FOLDER_NAME_TO_ENUM,
     OL_MAIL_ITEM,
@@ -83,32 +90,106 @@ def _check_item_class(item, expected_class: int, label: str) -> str | None:
 
 # --- MCP Server ---
 
-mcp = FastMCP(
-    "outlook-desktop-mcp",
-    instructions=(
+READ_ONLY = is_read_only()
+
+_INSTRUCTIONS_COMMON = (
+    "All operations use the locally authenticated Outlook profile — no "
+    "Microsoft Graph API, no Entra app registration, no OAuth tokens needed. "
+    "The user's existing Outlook session handles all authentication.\n\n"
+    "PREREQUISITE: Outlook Desktop (Classic) must be running. The new/modern "
+    "Outlook (olk.exe) is NOT supported — only the classic OUTLOOK.EXE.\n\n"
+    "Every tool takes an optional 'account' (substring of a mailbox name; see "
+    "list_accounts). Calendar tools take 'calendar' ('' = the account's default "
+    "calendar, 'all' = every calendar in that account, or a name/path from "
+    "list_calendars). Email bodies are plain text with quoted history removed "
+    "unless include_history is set; use get_conversation to see a whole thread. "
+    "Dates are ISO 8601 with the local UTC offset.\n\n"
+)
+
+if READ_ONLY:
+    _INSTRUCTIONS = (
+        "This MCP server gives READ-ONLY access to Microsoft Outlook Desktop on "
+        "Windows via COM automation. It can list, search and read emails, "
+        "reconstruct conversations, list every calendar and its events, list tasks, "
+        "and save attachments to disk. It cannot send, reply, move, mark, create, "
+        "update or delete anything — those tools are not registered.\n\n"
+        + _INSTRUCTIONS_COMMON
+        + "AVAILABLE TOOL CATEGORIES:\n"
+        "- Email: list, read, search (with sender filter), get_conversation, attachments\n"
+        "- Calendar: list_calendars, list events, get event, search events\n"
+        "- Tasks: list, get\n"
+        "- Categories, Rules, Out of Office: list / check only\n"
+        "- Folders: list folder hierarchy with item counts"
+    )
+else:
+    _INSTRUCTIONS = (
         "This MCP server gives you full access to Microsoft Outlook Desktop on "
         "Windows via COM automation. It can send emails, read inbox messages, "
         "search across folders, mark messages as read/unread, move messages "
         "between folders (including archive), reply to emails, and list the "
         "complete folder hierarchy.\n\n"
-        "All operations use the locally authenticated Outlook profile — no "
-        "Microsoft Graph API, no Entra app registration, no OAuth tokens needed. "
-        "The user's existing Outlook session handles all authentication.\n\n"
-        "PREREQUISITE: Outlook Desktop (Classic) must be running. The new/modern "
-        "Outlook (olk.exe) is NOT supported — only the classic OUTLOOK.EXE.\n\n"
-        "AVAILABLE TOOL CATEGORIES:\n"
-        "- Email: send, list, read, search, reply, mark read/unread, move, attachments\n"
-        "- Calendar: list events, create appointments/meetings, update, delete, "
-        "respond to invites, search events\n"
+        + _INSTRUCTIONS_COMMON
+        + "AVAILABLE TOOL CATEGORIES:\n"
+        "- Email: send, list, read, search (with sender filter), get_conversation, "
+        "reply, mark read/unread, move, attachments\n"
+        "- Calendar: list_calendars, list events, create appointments/meetings, update, "
+        "delete, respond to invites, search events\n"
         "- Tasks: create, list, complete, update, delete to-do items\n"
         "- Categories: list and set color categories on any item\n"
         "- Rules: list and manage mail rules\n"
         "- Out of Office: check auto-reply status\n"
         "- Folders: list folder hierarchy with item counts"
-    ),
-)
+    )
+
+mcp = FastMCP("outlook-desktop-mcp", instructions=_INSTRUCTIONS)
+
+
+def write_tool():
+    """Register a tool only when the server is not read-only.
+
+    In read-only mode the function is left as a plain coroutine: defined, never exposed.
+    """
+    if READ_ONLY:
+        return lambda func: func
+    return mcp.tool()
+
 
 bridge = OutlookBridge()
+
+
+# --- Helper: iterate an Items collection safely ---
+
+def _iter_items(items, limit: int):
+    """GetFirst/GetNext snapshot (robust after Sort/Restrict), capped at ``limit``."""
+    out = []
+    try:
+        item = items.GetFirst()
+        while item is not None and len(out) < limit:
+            out.append(item)
+            item = items.GetNext()
+    except Exception:
+        pass
+    return out
+
+
+def _folder_subtree(folder, out: list, depth: int = 0) -> None:
+    """``folder`` and every descendant, skipping Outlook's system folders."""
+    out.append(folder)
+    if depth > 10:
+        return
+    try:
+        for i in range(folder.Folders.Count):
+            sub = folder.Folders.Item(i + 1)
+            if str(sub.Name or "").lower() in _SKIP_SUBFOLDERS:
+                continue
+            _folder_subtree(sub, out, depth + 1)
+    except Exception:
+        pass
+
+
+_SKIP_SUBFOLDERS = {"deleted items", "junk email", "junk e-mail", "outbox", "sync issues",
+                    "conversation history", "rss feeds", "search folders"}
+_SENDER_SCAN_LIMIT = 1000  # items inspected per folder when filtering by sender
 
 
 # --- Helper: resolve store by account name ---
@@ -247,7 +328,7 @@ async def list_accounts() -> str:
 # TOOL 1: send_email
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def send_email(
     to: str,
     subject: str,
@@ -260,18 +341,20 @@ async def send_email(
     """Send an email using the user's Outlook account.
 
     Creates and sends an email immediately through the default Outlook profile.
-    The email will appear in the user's Sent Items folder after sending.
+    The email will appear in the user's Sent Items folder after sending. The
+    message is sent as HTML in the user's default font (Aptos 12 pt black unless
+    the OUTLOOK_MCP_FONT_* environment variables say otherwise); the plain-text
+    body is rendered into paragraphs, so write it as normal prose.
 
     Args:
         to: One or more recipient email addresses, separated by semicolons.
             Example: "alice@example.com" or "alice@example.com; bob@example.com"
         subject: The email subject line.
-        body: The plain-text body of the email. If html_body is also provided,
-            both are set and Outlook will prefer the HTML version.
+        body: The plain-text body of the email. Blank lines separate paragraphs.
         cc: Optional. CC recipients, separated by semicolons.
         bcc: Optional. BCC recipients, separated by semicolons.
-        html_body: Optional. HTML-formatted body. When provided, Outlook renders
-            the email as HTML. The plain-text body serves as fallback.
+        html_body: Optional. HTML-formatted body, used instead of 'body' and
+            wrapped in the default font so unstyled text matches.
         account: Optional. Account display name (or substring) to send from.
             Default: primary account. Use list_accounts to see available accounts.
 
@@ -294,7 +377,9 @@ async def send_email(
         if bcc:
             mail.BCC = bcc
         if html_body:
-            mail.HTMLBody = html_body
+            mail.HTMLBody = style_html(html_body)
+        elif not plain_text_mode():
+            mail.HTMLBody = text_to_html(body)
         mail.Send()
         return f"Email sent: '{subject}' to {to}"
 
@@ -308,6 +393,33 @@ async def send_email(
 # TOOL 2: list_emails
 # =====================================================================
 
+def _collect_summaries(folders, restriction: str, count: int, sender: str) -> list:
+    """Newest-first summaries across ``folders`` (restricted, optional sender filter)."""
+    results = []
+    for target in folders:
+        items = target.Items
+        items.Sort("[ReceivedTime]", True)
+        if restriction:
+            items = items.Restrict(restriction)
+        scan = _SENDER_SCAN_LIMIT if sender else count
+        matched = 0
+        for item in _iter_items(items, scan):
+            try:
+                if int(item.Class) != _OL_CLASS_MAIL:
+                    continue
+                smtp = get_smtp(item)
+                if sender and not sender_matches(item, sender, smtp):
+                    continue
+                results.append(format_email_summary(item))
+                matched += 1
+                if matched >= count:
+                    break
+            except Exception:
+                continue
+    results.sort(key=lambda r: r.get("received_time") or "", reverse=True)
+    return results[:count]
+
+
 @mcp.tool()
 async def list_emails(
     folder: str = "inbox",
@@ -315,43 +427,55 @@ async def list_emails(
     unread_only: bool = False,
     start_date: str = "",
     end_date: str = "",
+    sender: str = "",
+    include_subfolders: bool = False,
     account: str = "",
 ) -> str:
     """List recent emails from a specified Outlook folder.
 
     Returns a JSON array of email summaries sorted by received time (newest
-    first). Each summary includes entry_id, subject, sender, sender_name,
-    received_time, unread status, and attachment info.
+    first). Each summary includes entry_id, subject, sender (SMTP address),
+    sender_name, received_time (ISO 8601), folder, unread status, attachment
+    info and conversation_id.
 
     Use the entry_id from results to read full content with read_email,
-    or to perform actions like mark_as_read, move_email, or reply_email.
+    get_conversation for the whole thread, or actions like mark_as_read,
+    move_email, or reply_email.
 
     Args:
         folder: The folder to list. Case-insensitive names: "inbox" (default),
             "sent"/"sentmail", "drafts", "deleted"/"trash", "junk"/"spam",
-            "outbox", "archive", or any custom folder name visible in
-            list_folders output.
-        count: Maximum number of emails to return. Default 10, max recommended 50.
+            "outbox", "archive", a custom folder name, or a slash path such as
+            "Inbox/Clients" (see list_folders).
+        count: Maximum number of emails to return. Default 10, max 200.
         unread_only: If true, only return unread emails. Default false.
         start_date: Optional. Only return emails received on or after this date.
             ISO 8601 format (e.g. "2026-03-10" or "2026-03-10 09:00").
         end_date: Optional. Only return emails received on or before this date.
             ISO 8601 format. Default: now (if start_date is provided).
+        sender: Optional. Case-insensitive substring of the sender's email
+            address or display name, e.g. "freestone" or "linda@". Exchange
+            addresses are resolved to SMTP before matching.
+        include_subfolders: If true, also search every subfolder of 'folder'
+            (e.g. the whole Inbox tree). Default false.
         account: Optional. Account display name (or substring) to target.
             Default: primary account. Use list_accounts to see available accounts.
 
     Returns:
         JSON array of email summary objects.
     """
-    def _list(outlook, namespace, folder, count, unread_only, start_date, end_date, account):
+    def _list(outlook, namespace, folder, count, unread_only, start_date, end_date,
+              sender, include_subfolders, account):
         count = min(max(1, count), 200)
         store = _require_store(namespace, account)
         target = _resolve_folder(namespace, folder, store)
         if not target:
             return json.dumps({"error": f"Folder '{folder}' not found"})
-
-        items = target.Items
-        items.Sort("[ReceivedTime]", True)
+        folders = []
+        if include_subfolders:
+            _folder_subtree(target, folders)
+        else:
+            folders.append(target)
 
         # Build restriction filters
         restrictions = []
@@ -367,20 +491,12 @@ async def list_emails(
             # Default end to now when start is specified
             restrictions.append(f"[ReceivedTime] <= '{datetime.now().strftime('%m/%d/%Y %H:%M')}'")
 
-        if restrictions:
-            items = items.Restrict(" AND ".join(restrictions))
-
-        results = []
-        limit = min(count, items.Count)
-        for i in range(limit):
-            try:
-                results.append(format_email_summary(items.Item(i + 1)))
-            except Exception:
-                continue
+        results = _collect_summaries(folders, " AND ".join(restrictions), count, sender)
         return json.dumps(results, indent=2, default=str)
 
     try:
-        return await bridge.call(_list, folder, count, unread_only, start_date, end_date, account)
+        return await bridge.call(_list, folder, count, unread_only, start_date, end_date,
+                                 sender, include_subfolders, account)
     except Exception as e:
         return f"Error listing emails: {format_com_error(e)}"
 
@@ -394,6 +510,7 @@ async def read_email(
     entry_id: str = "",
     subject_search: str = "",
     folder: str = "inbox",
+    include_history: bool = False,
     account: str = "",
 ) -> str:
     """Read the full content of a specific email.
@@ -401,6 +518,12 @@ async def read_email(
     Retrieves complete email details including body text, recipients, CC,
     and metadata. Provide EITHER entry_id (preferred, exact match) OR
     subject_search (finds most recent match by subject substring).
+
+    By default the body is the message's OWN text: the quoted earlier
+    messages under a reply are removed before the 5000-character cap
+    (body_trimmed=true says something was removed). Use get_conversation
+    to read the earlier messages each once, or include_history=true to get
+    the raw body with the quoted chain.
 
     Args:
         entry_id: The unique Outlook EntryID of the email. Most reliable way
@@ -410,17 +533,22 @@ async def read_email(
             to search for in email subjects. Returns the most recent match.
         folder: Folder to search when using subject_search. Ignored when
             entry_id is provided. Default "inbox".
+        include_history: If true, keep the quoted earlier messages in the body.
+            Default false.
         account: Optional. Account display name (or substring) to target.
             Default: primary account. Use list_accounts to see available accounts.
 
     Returns:
         JSON object with full email details (entry_id, subject, sender,
-        sender_name, received_time, unread, to, cc, body, attachment info).
+        sender_name, received_time, sent_time, folder, unread, to, cc,
+        recipients with SMTP addresses, body, body_trimmed, body_truncated,
+        attachment info, conversation_id).
     """
-    def _read(outlook, namespace, entry_id, subject_search, folder, account):
+    def _read(outlook, namespace, entry_id, subject_search, folder, include_history, account):
+        trim = not include_history
         if entry_id:
             item = namespace.GetItemFromID(entry_id)
-            return json.dumps(format_email_full(item), indent=2, default=str)
+            return json.dumps(format_email_full(item, trim_history=trim), indent=2, default=str)
 
         if not subject_search:
             return json.dumps({"error": "Provide either entry_id or subject_search"})
@@ -439,19 +567,83 @@ async def read_email(
         if items.Count == 0:
             return json.dumps({"error": f"No email found matching '{subject_search}'"})
 
-        return json.dumps(format_email_full(items.Item(1)), indent=2, default=str)
+        return json.dumps(format_email_full(items.Item(1), trim_history=trim), indent=2, default=str)
 
     try:
-        return await bridge.call(_read, entry_id, subject_search, folder, account)
+        return await bridge.call(_read, entry_id, subject_search, folder, include_history, account)
     except Exception as e:
         return f"Error reading email: {format_com_error(e)}"
+
+
+# =====================================================================
+# TOOL: get_conversation
+# =====================================================================
+
+@mcp.tool()
+async def get_conversation(
+    entry_id: str,
+    count: int = 30,
+    include_bodies: bool = True,
+    account: str = "",
+) -> str:
+    """Return every message of the conversation an email belongs to, oldest first.
+
+    Walks Outlook's conversation tree across all folders (Inbox subfolders,
+    Sent Items, Archive) and falls back to a ConversationTopic search when the
+    tree is unavailable. Each message appears once (deduped by Message-ID),
+    with its own text only (quoted history removed), so reading the thread
+    costs each message once. Deleted Items, Junk, Drafts and Outbox are
+    excluded.
+
+    Args:
+        entry_id: EntryID of any message in the conversation (from list_emails,
+            search_emails or read_email).
+        count: Maximum messages to return; the oldest are dropped beyond this.
+            Default 30, max 200.
+        include_bodies: If true (default), include each message's trimmed body.
+            If false, return metadata only (much smaller).
+        account: Optional. Account display name (or substring) the message lives
+            in. Default: primary account.
+
+    Returns:
+        JSON object: {"topic", "source", "message_count", "messages": [...]}
+        where source is "conversation", "topic_search" or "none".
+    """
+    def _get(outlook, namespace, entry_id, count, include_bodies, account):
+        count = min(max(1, count), 200)
+        store = _require_store(namespace, account)
+        item = namespace.GetItemFromID(entry_id, store.StoreID) if account else namespace.GetItemFromID(entry_id)
+        if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
+            return err
+        messages, source = conversation_items(store, item, limit=count)
+        out = []
+        for path, node in messages:
+            try:
+                record = format_email_full(node) if include_bodies else format_email_summary(node)
+                record["folder"] = path or record.get("folder", "")
+                record["is_requested_message"] = str(node.EntryID) == str(item.EntryID)
+                out.append(record)
+            except Exception:
+                continue
+        return json.dumps({
+            "topic": str(item.ConversationTopic or item.Subject or ""),
+            "conversation_id": str(item.ConversationID or ""),
+            "source": source,
+            "message_count": len(out),
+            "messages": out,
+        }, indent=2, default=str)
+
+    try:
+        return await bridge.call(_get, entry_id, count, include_bodies, account)
+    except Exception as e:
+        return f"Error reading conversation: {format_com_error(e)}"
 
 
 # =====================================================================
 # TOOL 4: mark_as_read
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def mark_as_read(entry_id: str, account: str = "") -> str:
     """Mark a specific email as read in Outlook.
 
@@ -490,7 +682,7 @@ async def mark_as_read(entry_id: str, account: str = "") -> str:
 # TOOL 5: mark_as_unread
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def mark_as_unread(entry_id: str, account: str = "") -> str:
     """Mark a specific email as unread in Outlook.
 
@@ -529,7 +721,7 @@ async def mark_as_unread(entry_id: str, account: str = "") -> str:
 # TOOL 6: move_email
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def move_email(
     entry_id: str,
     target_folder: str = "archive",
@@ -576,7 +768,7 @@ async def move_email(
 # TOOL 7: reply_email
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def reply_email(
     entry_id: str,
     body: str,
@@ -585,13 +777,15 @@ async def reply_email(
 ) -> str:
     """Reply to an email in Outlook.
 
-    Creates and sends a reply, preserving the original message thread.
+    Creates and sends a reply, preserving the original message thread (Outlook's
+    quoted history stays below). The reply text is inserted as HTML in the user's
+    default font (Aptos 12 pt black unless OUTLOOK_MCP_FONT_* says otherwise).
     Use reply_all=True to reply to all recipients (sender + CC list).
 
     Args:
         entry_id: The unique Outlook EntryID of the email to reply to.
-        body: The reply message text. Prepended above the original message
-            in the email thread.
+        body: The reply message text, as plain prose; blank lines separate
+            paragraphs. Placed above the original message in the thread.
         reply_all: If true, reply to all recipients (sender + all CC/To).
             If false (default), reply only to the sender.
         account: Optional. Account display name (or substring). Only needed
@@ -610,7 +804,11 @@ async def reply_email(
             return err
         subject = item.Subject
         reply_item = item.ReplyAll() if reply_all else item.Reply()
-        reply_item.Body = body + "\n\n" + reply_item.Body
+        if plain_text_mode():
+            reply_item.Body = body + "\n\n" + reply_item.Body
+        else:
+            # Inject inside <body> so Outlook's reply template can't restyle it (see utils/html.py)
+            reply_item.HTMLBody = inject_into_body(reply_item.HTMLBody, text_to_html(body))
         reply_item.Send()
         return f"Reply sent to '{subject}' (reply_all={reply_all})"
 
@@ -705,47 +903,64 @@ async def list_folders(folder: str = "", max_depth: int = 3, account: str = "") 
 
 @mcp.tool()
 async def search_emails(
-    query: str,
+    query: str = "",
     folder: str = "inbox",
     count: int = 10,
     start_date: str = "",
     end_date: str = "",
+    sender: str = "",
+    include_subfolders: bool = False,
     account: str = "",
 ) -> str:
     """Search for emails in Outlook using text search.
 
-    Searches email subjects and bodies using Outlook's DASL filter.
-    Results are sorted by received time (newest first). Each result
-    includes entry_id for further operations.
+    Searches email subjects and bodies using Outlook's DASL filter, optionally
+    limited to one sender. Results are sorted by received time (newest first).
+    Each result includes entry_id for further operations.
 
     Args:
-        query: The search term (case-insensitive substring match).
-            Examples: "budget report", "meeting notes", "quarterly".
-        folder: Folder to search in. Default "inbox". Supports same
-            names as list_emails.
-        count: Maximum results to return. Default 10.
+        query: The search term (case-insensitive substring match on subject or
+            body). Examples: "budget report", "meeting notes". May be empty when
+            'sender' is given, to list everything from that sender.
+        folder: Folder to search in. Default "inbox". Supports the same names
+            and slash paths as list_emails.
+        count: Maximum results to return. Default 10, max 200.
         start_date: Optional. Only return emails received on or after this date.
             ISO 8601 format (e.g. "2026-03-10" or "2026-03-10 09:00").
         end_date: Optional. Only return emails received on or before this date.
             ISO 8601 format. Default: now (if start_date is provided).
+        sender: Optional. Case-insensitive substring of the sender's email
+            address or display name, e.g. "freestone" or "Linda Harlow".
+        include_subfolders: If true, also search every subfolder of 'folder'.
+            Default false.
         account: Optional. Account display name (or substring) to target.
             Default: primary account. Use list_accounts to see available accounts.
 
     Returns:
         JSON array of matching email summaries, or an error.
     """
-    def _search(outlook, namespace, query, folder, count, start_date, end_date, account):
+    def _search(outlook, namespace, query, folder, count, start_date, end_date,
+                sender, include_subfolders, account):
         count = min(max(1, count), 200)
+        if not query and not sender:
+            return json.dumps({"error": "Provide a query, a sender, or both"})
         store = _require_store(namespace, account)
         target = _resolve_folder(namespace, folder, store)
         if not target:
             return json.dumps({"error": f"Folder '{folder}' not found"})
+        folders = []
+        if include_subfolders:
+            _folder_subtree(target, folders)
+        else:
+            folders.append(target)
 
-        safe_query = _safe_dasl(query)
-        dasl_parts = [
-            f"(\"urn:schemas:httpmail:subject\" LIKE '%{safe_query}%' OR "
-            f"\"urn:schemas:httpmail:textdescription\" LIKE '%{safe_query}%')"
-        ]
+        dasl_parts = []
+        if query:
+            safe_query = _safe_dasl(query)
+            dasl_parts.append(
+                f"(\"urn:schemas:httpmail:subject\" LIKE '%{safe_query}%' OR "
+                f"\"urn:schemas:httpmail:textdescription\" LIKE '%{safe_query}%')"
+            )
         if start_date:
             start = _parse_date(start_date)
             dasl_parts.append(
@@ -761,21 +976,13 @@ async def search_emails(
                 f"\"urn:schemas:httpmail:datereceived\" <= '{datetime.now().strftime('%m/%d/%Y %H:%M')}'"
             )
 
-        filter_str = "@SQL=" + " AND ".join(dasl_parts)
-        items = target.Items.Restrict(filter_str)
-        items.Sort("[ReceivedTime]", True)
-
-        results = []
-        limit = min(count, items.Count)
-        for i in range(limit):
-            try:
-                results.append(format_email_summary(items.Item(i + 1)))
-            except Exception:
-                continue
+        filter_str = ("@SQL=" + " AND ".join(dasl_parts)) if dasl_parts else ""
+        results = _collect_summaries(folders, filter_str, count, sender)
         return json.dumps(results, indent=2, default=str)
 
     try:
-        return await bridge.call(_search, query, folder, count, start_date, end_date, account)
+        return await bridge.call(_search, query, folder, count, start_date, end_date,
+                                 sender, include_subfolders, account)
     except Exception as e:
         return f"Error searching emails: {format_com_error(e)}"
 
@@ -792,6 +999,80 @@ def _parse_date(date_str: str) -> datetime:
     return datetime.fromisoformat(date_str)
 
 
+# --- Helper: events from one or more calendar folders ---
+
+_EVENT_SCAN_LIMIT = 2000  # occurrences inspected per calendar
+
+
+def _events_in(calendars, start: datetime, end: datetime, count: int, subject_query: str = "") -> list:
+    """Event summaries across ``calendars`` overlapping [start, end], sorted by start."""
+    query_lower = subject_query.lower()
+    results = []
+    for label, folder in calendars:
+        try:
+            items = folder.Items
+            # CRITICAL ORDER: Sort BEFORE IncludeRecurrences BEFORE Restrict
+            items.Sort("[Start]")
+            items.IncludeRecurrences = True
+            # Overlap test, so events that started earlier but run into the window are included.
+            restrict = (
+                f"[Start] <= '{end.strftime('%m/%d/%Y %H:%M')}' "
+                f"AND [End] >= '{start.strftime('%m/%d/%Y %H:%M')}'"
+            )
+            filtered = items.Restrict(restrict)
+        except Exception as e:  # one unreadable calendar (e.g. an offline shared mailbox) must not sink the rest
+            logger.warning("Calendar '%s' unreadable: %s", label, e)
+            results.append({"calendar": label, "error": format_com_error(e)})
+            continue
+        seen: set[tuple[str, str]] = set()
+        for item in _iter_items(filtered, _EVENT_SCAN_LIMIT):
+            try:
+                if int(item.Class) != _OL_CLASS_APPOINTMENT:
+                    continue
+                if query_lower and query_lower not in (item.Subject or "").lower():
+                    continue
+                key = (str(item.EntryID), str(item.Start))  # occurrences share the master's EntryID
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append(format_event_summary(item, label))
+            except Exception:
+                continue
+    results.sort(key=lambda r: (r.get("start") or "", r.get("end") or ""))
+    return results[:count]
+
+
+# =====================================================================
+# TOOL: list_calendars
+# =====================================================================
+
+@mcp.tool()
+async def list_calendars(account: str = "") -> str:
+    """List every calendar folder in an account, not just the default one.
+
+    Outlook keeps extra calendars (Birthdays, holidays, calendars shared with
+    you, internet subscriptions) as separate folders, usually nested under the
+    main Calendar. Each entry has path, name, is_default and item_count. Pass
+    the path or name as the 'calendar' argument of list_events / search_events,
+    or 'all' to read every calendar in the account at once.
+
+    Args:
+        account: Optional. Account display name (or substring) to target.
+            Default: primary account. Use list_accounts to see available accounts.
+
+    Returns:
+        JSON array of calendar objects, default calendar first.
+    """
+    def _list(outlook, namespace, account):
+        store = _require_store(namespace, account)
+        return json.dumps(describe_calendars(store), indent=2, default=str)
+
+    try:
+        return await bridge.call(_list, account)
+    except Exception as e:
+        return f"Error listing calendars: {format_com_error(e)}"
+
+
 # =====================================================================
 # TOOL 10: list_events
 # =====================================================================
@@ -801,14 +1082,19 @@ async def list_events(
     start_date: str = "",
     end_date: str = "",
     count: int = 20,
+    calendar: str = "",
     account: str = "",
 ) -> str:
-    """List upcoming calendar events from Outlook.
+    """List calendar events from Outlook within a date range.
 
-    Returns a JSON array of event summaries within a date range, sorted by
-    start time. Includes recurring event occurrences. Each summary has
-    entry_id, subject, start, end, duration, location, organizer, attendees,
-    and status info.
+    Returns a JSON array of event summaries sorted by start time, including
+    recurring occurrences and events that started before the range but run
+    into it. Each summary has entry_id, subject, start, end (ISO 8601 with
+    offset), duration, location, organizer, attendees, status info and the
+    calendar it came from.
+
+    To check availability across several calendars, call with calendar="all"
+    (or once per account) and look for gaps.
 
     Use entry_id from results with get_event, update_event, delete_event,
     or respond_to_meeting.
@@ -817,47 +1103,26 @@ async def list_events(
         start_date: Start of date range in ISO 8601 format (e.g. "2026-02-25"
             or "2026-02-25 09:00"). Default: now.
         end_date: End of date range. Default: 7 days from start_date.
-        count: Maximum number of events to return. Default 20.
+        count: Maximum number of events to return. Default 20, max 200.
+        calendar: Optional. "" (default) = the account's main Calendar; "all" =
+            every calendar in the account; otherwise a calendar name or path
+            from list_calendars (e.g. "Birthdays" or "Calendar/Kate Work").
         account: Optional. Account display name (or substring) to target.
             Default: primary account. Use list_accounts to see available accounts.
 
     Returns:
         JSON array of event summary objects.
     """
-    def _list(outlook, namespace, start_date, end_date, count, account):
+    def _list(outlook, namespace, start_date, end_date, count, calendar, account):
         count = min(max(1, count), 200)
         store = _require_store(namespace, account)
-        calendar = store.GetDefaultFolder(OL_FOLDER_CALENDAR)
-        items = calendar.Items
-
-        # CRITICAL ORDER: Sort BEFORE IncludeRecurrences BEFORE Restrict
-        items.Sort("[Start]")
-        items.IncludeRecurrences = True
-
+        calendars = resolve_calendars(store, calendar)
         start = _parse_date(start_date) if start_date else datetime.now()
         end = _parse_date(end_date) if end_date else start + timedelta(days=7)
-
-        restrict = (
-            f"[Start] >= '{start.strftime('%m/%d/%Y %H:%M')}' "
-            f"AND [Start] <= '{end.strftime('%m/%d/%Y %H:%M')}'"
-        )
-        filtered = items.Restrict(restrict)
-
-        results = []
-        n = 0
-        for item in filtered:
-            n += 1
-            try:
-                results.append(format_event_summary(item))
-            except Exception:
-                continue
-            if n >= count:
-                break
-
-        return json.dumps(results, indent=2, default=str)
+        return json.dumps(_events_in(calendars, start, end, count), indent=2, default=str)
 
     try:
-        return await bridge.call(_list, start_date, end_date, count, account)
+        return await bridge.call(_list, start_date, end_date, count, calendar, account)
     except Exception as e:
         return f"Error listing events: {format_com_error(e)}"
 
@@ -900,7 +1165,7 @@ async def get_event(entry_id: str, account: str = "") -> str:
 # TOOL 12: create_event
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def create_event(
     subject: str,
     start: str,
@@ -980,7 +1245,7 @@ async def create_event(
 # TOOL 13: create_meeting
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def create_meeting(
     subject: str,
     start: str,
@@ -1066,7 +1331,7 @@ async def create_meeting(
 # TOOL 14: update_event
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def update_event(
     entry_id: str,
     subject: str = "",
@@ -1135,7 +1400,7 @@ async def update_event(
 # TOOL 15: delete_event
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def delete_event(entry_id: str, account: str = "") -> str:
     """Delete a calendar event or cancel a meeting.
 
@@ -1183,7 +1448,7 @@ async def delete_event(entry_id: str, account: str = "") -> str:
 # TOOL 16: respond_to_meeting
 # =====================================================================
 
-@mcp.tool()
+@write_tool()
 async def respond_to_meeting(
     entry_id: str,
     response: str,
@@ -1243,6 +1508,7 @@ async def search_events(
     start_date: str = "",
     end_date: str = "",
     count: int = 10,
+    calendar: str = "",
     account: str = "",
 ) -> str:
     """Search for calendar events by keyword.
@@ -1256,45 +1522,26 @@ async def search_events(
         start_date: Start of search range in ISO 8601 format. Default: 30
             days ago.
         end_date: End of search range. Default: 30 days from now.
-        count: Maximum results to return. Default 10.
+        count: Maximum results to return. Default 10, max 200.
+        calendar: Optional. "" (default) = the account's main Calendar; "all" =
+            every calendar in the account; otherwise a name or path from
+            list_calendars.
         account: Optional. Account display name (or substring) to target.
             Default: primary account. Use list_accounts to see available accounts.
 
     Returns:
         JSON array of matching event summaries.
     """
-    def _search(outlook, namespace, query, start_date, end_date, count, account):
+    def _search(outlook, namespace, query, start_date, end_date, count, calendar, account):
         count = min(max(1, count), 200)
         store = _require_store(namespace, account)
-        calendar = store.GetDefaultFolder(OL_FOLDER_CALENDAR)
-        items = calendar.Items
-        items.Sort("[Start]")
-        items.IncludeRecurrences = True
-
+        calendars = resolve_calendars(store, calendar)
         start = _parse_date(start_date) if start_date else datetime.now() - timedelta(days=30)
         end = _parse_date(end_date) if end_date else datetime.now() + timedelta(days=30)
-
-        restrict = (
-            f"[Start] >= '{start.strftime('%m/%d/%Y %H:%M')}' "
-            f"AND [Start] <= '{end.strftime('%m/%d/%Y %H:%M')}'"
-        )
-        filtered = items.Restrict(restrict)
-
-        query_lower = query.lower()
-        results = []
-        for item in filtered:
-            if query_lower in (item.Subject or "").lower():
-                try:
-                    results.append(format_event_summary(item))
-                except Exception:
-                    continue
-                if len(results) >= count:
-                    break
-
-        return json.dumps(results, indent=2, default=str)
+        return json.dumps(_events_in(calendars, start, end, count, query), indent=2, default=str)
 
     try:
-        return await bridge.call(_search, query, start_date, end_date, count, account)
+        return await bridge.call(_search, query, start_date, end_date, count, calendar, account)
     except Exception as e:
         return f"Error searching events: {format_com_error(e)}"
 
@@ -1376,7 +1623,7 @@ async def get_task(entry_id: str, account: str = "") -> str:
         return f"Error reading task: {format_com_error(e)}"
 
 
-@mcp.tool()
+@write_tool()
 async def create_task(
     subject: str,
     body: str = "",
@@ -1438,7 +1685,7 @@ async def create_task(
         return f"Error creating task: {format_com_error(e)}"
 
 
-@mcp.tool()
+@write_tool()
 async def complete_task(entry_id: str, account: str = "") -> str:
     """Mark a task as complete.
 
@@ -1471,7 +1718,7 @@ async def complete_task(entry_id: str, account: str = "") -> str:
         return f"Error completing task: {format_com_error(e)}"
 
 
-@mcp.tool()
+@write_tool()
 async def delete_task(entry_id: str, account: str = "") -> str:
     """Delete a task from Outlook.
 
@@ -1638,7 +1885,7 @@ async def list_categories(account: str = "") -> str:
         return f"Error listing categories: {format_com_error(e)}"
 
 
-@mcp.tool()
+@write_tool()
 async def set_category(
     entry_id: str,
     categories: str,
@@ -1715,7 +1962,7 @@ async def list_rules(account: str = "") -> str:
         return f"Error listing rules: {format_com_error(e)}"
 
 
-@mcp.tool()
+@write_tool()
 async def toggle_rule(
     rule_name: str,
     enabled: bool,
@@ -1801,7 +2048,7 @@ async def get_out_of_office(account: str = "") -> str:
 # =====================================================================
 
 def main():
-    logger.info("Starting Outlook Desktop MCP server...")
+    logger.info("Starting Outlook Desktop MCP server%s...", " (read-only)" if READ_ONLY else "")
     bridge.start()
     logger.info("COM bridge ready. Starting MCP stdio transport...")
     try:

@@ -1,8 +1,9 @@
+# Fork note: upstream publishes to PyPI on every push to main. This fork is not the PyPI
+# package owner, so publishing is manual-only here to avoid failing runs on each push.
 name: Publish to PyPI
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   publish:
