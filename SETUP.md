@@ -180,11 +180,15 @@ changes nothing. Run it from the folder you installed into:
 .\.venv\Scripts\python.exe tests\live_check.py
 ```
 
-## Draft settings
+## Settings
 
-New drafts are saved to Drafts without opening a window. To have them pop open in Outlook,
-add `"env": { "OUTLOOK_MCP_OPEN_DRAFTS": "1" }` inside the `"outlook-desktop"` block of the
-desktop app's config (or `-e OUTLOOK_MCP_OPEN_DRAFTS=1` on the `claude mcp add` command).
+Most settings are changed by asking Claude: "make my work mailbox the default account", "open
+drafts in a window", "hide the club mailbox". Claude calls `set_setting`, which writes
+`%LOCALAPPDATA%\outlook-desktop-mcp\settings.json`; the change applies at once. The README's
+*Settings* table lists them. Each can also be set as an environment variable (for example
+`"env": { "OUTLOOK_MCP_OPEN_DRAFTS": "1" }` inside the `"outlook-desktop"` block of the desktop
+app's config, or `-e OUTLOOK_MCP_OPEN_DRAFTS=1` on the `claude mcp add` command), which then
+overrides the file.
 
 ### Font
 

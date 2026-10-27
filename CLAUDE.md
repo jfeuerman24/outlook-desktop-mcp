@@ -89,9 +89,11 @@ normal. There are two permanent fixes in README.md under *Programmatic Access se
 Mention they exist, but do not apply the registry file unless asked: it needs administrator
 rights and it switches the check off for every program on the PC, not just this one.
 
-Show them the accounts that came back and say which one Outlook treats as the default. Tools
-that are not given an account read from that default, so for anyone with several mailboxes,
-name the account in requests or ask Claude to.
+Show them the accounts that came back and say which one is the default: tools that are not
+given an account read from it. If the person has several mailboxes, ask which one they want as
+the default and set it with `set_setting("default_account", "<name>")`; it applies at once. Offer
+to hide mailboxes they never use (`set_setting("hide_accounts", "...")`) so "all accounts"
+searches skip them. Explain that settings can be changed any time by asking.
 
 ### Stage 6: Show what it can do
 
@@ -100,7 +102,9 @@ Give five or six examples tuned to the accounts you just saw, for instance:
 - "Show me unread email in my work inbox from the last two days."
 - "Read the newest one and give me the whole thread."
 - "What's on all my calendars Tuesday and Wednesday?"
-- "Save the attachment from that email to my Downloads folder."
+- "What does the lease in that email say about assignment?" Claude reads the PDF with
+  `read_attachment`; nothing is saved or opened.
+- "When did we last hear from Chad?" `contact_history` covers every account and calendar.
 - "Draft a reply saying I can do Thursday." The reply lands in Drafts; they open it and press Send.
 - "Set up a 30-minute meeting with alex@example.com tomorrow at 2pm." The invitation sits on
   their calendar unsent for them to review.
@@ -112,6 +116,7 @@ the full list of tools.
 
 | Symptom | What to do |
 |---|---|
+| Anything fails and the cause is not obvious | Call `health_check` first. It says whether Outlook is reachable, which accounts loaded, the settings in force, and whether Outlook's permission prompt is blocking address access (common when the laptop lid is closed and nobody can click Allow). |
 | After the restart, no Outlook tools in your tool list | Run `.venv\Scripts\python.exe scripts\configure_claude_desktop.py --show` and check the entry and that the exe exists. Ask the person to check **Settings → Developer**: the server should be listed with a status; **Open Logs Folder** has `mcp-server-outlook-desktop.log`. Most often Claude was not fully quit, or Outlook was not running when Claude started. |
 | `install.ps1` says it cannot find Claude's settings folder, or Claude does not pick up the server after a restart | Ask the person to click their initials (bottom-left) → **Settings** → **Developer** → **Edit Config**. A File Explorer window opens on `claude_desktop_config.json`; ask them to click the address bar and paste you the path. Then run `.venv\Scripts\python.exe scripts\configure_claude_desktop.py --config "<that path>\claude_desktop_config.json"` and have them restart Claude. |
 | Tools exist but every call errors | Outlook is not running, the New Outlook switch is on, or Outlook's permission prompt is waiting behind another window. |
@@ -128,5 +133,7 @@ the full list of tools.
 - Drafts are written in the chat first. When asked for an email, reply or meeting, show the
   whole thing in the conversation, revise it there, and then ask explicitly whether to put it
   in Outlook. Call `draft_email`, `draft_reply`, `draft_forward` or `draft_meeting` only after a yes.
+- A revision to a draft that already exists in Outlook goes through `update_draft` (same
+  explicit yes first), never a second `draft_*` call that leaves two drafts behind.
 - Do not read their mail during setup beyond the test call, unless they ask.
 - Keep the chat about setup; this folder's code is not the point for a new user.

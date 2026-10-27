@@ -56,6 +56,22 @@ install and the settings change without Claude.
 Ask Claude to remove it, or run `.venv\Scripts\python.exe scripts\configure_claude_desktop.py --remove`,
 restart Claude, and delete the folder.
 
+## What this fork changes
+
+| Change | Where |
+|---|---|
+| **Never sends.** Upstream's `send_email`, `reply_email` and `create_meeting` are replaced by `draft_email`, `draft_reply`, `draft_forward` and `draft_meeting`, which save the item for you to send. `respond_to_meeting` is gone and `delete_event` refuses meetings you organised, because both would send a message. | `server.py` |
+| **Windows only.** The macOS/AppleScript server was removed. | `entrypoint.py` |
+| **Claude installs and explains it.** `CLAUDE.md` is the guide Claude follows; `install.ps1` / `install.cmd` do the install and register the server with the desktop app, including the Microsoft Store build. | `CLAUDE.md`, `install.ps1`, `scripts/` |
+| **Drafts are written in the chat first.** The draft tools tell Claude to show the full draft and ask before putting it in Outlook; drafts are single-spaced in Aptos 12 pt with your signature, and saved quietly to Drafts unless you turn the window on. | `server.py`, `utils/html.py` |
+| **Settings by conversation.** `set_setting` / `get_settings` for the default account, hidden accounts, draft window and font, stored outside the repo. | `utils/settings.py` |
+| **Attachments read in place, files attached from disk.** `read_attachment` (PDF, Word, Excel, PowerPoint, CSV, text, .msg), `add_attachment`, and an `attachments` argument on every draft tool. | `utils/extract.py`, `server.py` |
+| **One-call lookups.** `contact_history` (one person across every account and calendar), `account="all"` on `list_emails`/`search_emails`, `update_draft`, `health_check`. | `server.py` |
+| **Every calendar, not just the default.** `list_calendars`; `list_events` and `search_events` take `calendar` (`""`, `"all"`, or a name/path). | `tools/calendars.py` |
+| **Thread reconstruction.** `get_conversation` walks Outlook's conversation across folders and dates, deduped by Message-ID, oldest first. | `tools/conversation.py` |
+| **Quoted history trimmed, Exchange addresses resolved, ISO dates.** `read_email` returns the message's own text; senders inside your own organisation come back as real addresses; dates carry the local UTC offset. | `utils/text.py`, `utils/addresses.py`, `utils/dates.py` |
+| **Offline unit tests** (`python -m unittest discover -s tests`) and a GitHub Actions workflow that runs them. | `tests/test_*.py` |
+
 ## Requirements
 
 - **Outlook Desktop (Classic)** — the `OUTLOOK.EXE` that comes with Microsoft 365 / Office. The new "modern" Outlook (`olk.exe`) does **not** support COM
@@ -89,14 +105,16 @@ You have three options:
 
 | Tool | Description |
 |------|-------------|
-| `list_emails` | List recent emails from any folder, with optional unread, date, sender and subfolder filters |
+| `list_emails` | List recent emails from any folder, with optional unread, date, sender and subfolder filters; `account="all"` for every mailbox |
 | `read_email` | Read full email content by entry ID or subject search (quoted history trimmed unless `include_history`) |
-| `search_emails` | Full-text search across email subjects and bodies, optionally by sender and across subfolders |
-| `get_conversation` | Every message of a thread, oldest first, each once, across folders and dates |
+| `search_emails` | Full-text search across email subjects and bodies, optionally by sender, across subfolders, and with `account="all"` across every mailbox |
+| `get_conversation` | Every message of a thread, oldest first, each once, across folders and dates; `max_body_chars` for a cheap look at long threads |
+| `contact_history` | One person across every account: last received, last sent, recent messages both ways, last and next meeting |
 | `list_folders` | Browse the folder hierarchy with item counts |
-| `draft_email` | Write a new email to Drafts with To/CC/BCC and open it in Outlook. **Not sent.** |
-| `draft_reply` | Write a reply or reply-all above the quoted thread, save to Drafts, open in Outlook. **Not sent.** |
+| `draft_email` | Write a new email to Drafts with To/CC/BCC and optional file attachments. **Not sent.** |
+| `draft_reply` | Write a reply or reply-all above the quoted thread, save to Drafts, optional attachments. **Not sent.** |
 | `draft_forward` | Forward an email with Outlook's own Forward() (FW: subject, header block, quoted message, attachments), your note above it, saved to Drafts. Can forward the newest message of the thread and pull in attachments from earlier messages. **Not sent.** |
+| `update_draft` | Change an existing draft's note, subject or recipients instead of making a new one. **Not sent.** |
 | `mark_as_read` | Mark a specific email as read |
 | `mark_as_unread` | Mark a specific email as unread |
 | `move_email` | Move an email to Archive, Trash, or any folder |
@@ -128,9 +146,11 @@ You have three options:
 
 | Tool | Description |
 |------|-------------|
-| `list_accounts` | List the mailboxes in the Outlook profile |
+| `list_accounts` | List the mailboxes in the Outlook profile (hidden ones left out unless asked) |
 | `list_attachments` | List all attachments on an email or calendar event |
 | `save_attachment` | Save an attachment to a local directory (writes to disk, never to the mailbox) |
+| `read_attachment` | Read the text of a PDF, Word, Excel, PowerPoint, CSV, text or .msg attachment without saving it |
+| `add_attachment` | Attach files from this PC to an existing draft |
 
 ### Categories, Rules, Out of Office
 
@@ -142,7 +162,15 @@ You have three options:
 | `toggle_rule` | Enable or disable a mail rule by name |
 | `get_out_of_office` | Check whether Out of Office auto-reply is on or off |
 
-**Total: 32 tools.**
+### Settings, health
+
+| Tool | Description |
+|------|-------------|
+| `get_settings` | Show every setting, its value and where it came from |
+| `set_setting` | Change a setting by asking Claude (default account, hidden accounts, draft window, font); takes effect at once |
+| `health_check` | Server version, Outlook running, accounts loaded, settings, and whether Outlook's permission prompt is blocking |
+
+**Total: 39 tools.**
 
 ### Nothing sends
 
@@ -174,18 +202,38 @@ list_events start_date="2026-10-27" end_date="2026-10-29" calendar="all" account
 To check availability across accounts, call `list_events` with `calendar="all"` once per account and
 compare the results.
 
-### Draft settings
+### Settings
 
-By default a new draft is saved to Drafts (or, for a meeting, onto the calendar) without
-opening a window; Claude tells you where it is. Set `OUTLOOK_MCP_OPEN_DRAFTS=1` before the
-server starts to have every draft pop open in Outlook instead. Either way, a single call can
-say `open_in_outlook=true` or `false` to override.
+Settings are changed by asking Claude ("make my HGP mailbox the default account", "hide the
+Pickleball mailbox"), which calls `set_setting`. They are stored in
+`%LOCALAPPDATA%\outlook-desktop-mcp\settings.json`, apply immediately, and survive restarts
+and updates. `get_settings` shows them. Each one can also be set as an environment variable in
+Claude's config, which then overrides the file.
 
-#### Font
+| Setting | Env var | Default | What it does |
+|---|---|---|---|
+| `default_account` | `OUTLOOK_MCP_DEFAULT_ACCOUNT` | Outlook's default mailbox | Account used when a request does not name one |
+| `hide_accounts` | `OUTLOOK_MCP_HIDE_ACCOUNTS` | none | Mailboxes (name substrings, `;`-separated) left out of `list_accounts` and `account="all"`; still reachable by name |
+| `open_drafts` | `OUTLOOK_MCP_OPEN_DRAFTS` | off | Open each new draft in an Outlook window instead of only saving it. A single call can still say `open_in_outlook=true/false` |
+| `font_family`, `font_size_pt`, `font_color` | `OUTLOOK_MCP_FONT_*` | Aptos, 12, black | Font for the text the server writes into drafts |
+| `plain_text` | `OUTLOOK_MCP_PLAIN_TEXT` | off | Write drafts as plain text instead of styled HTML |
 
-Drafts are written as HTML in Aptos 12 pt black so they look the same everywhere. Override with
-environment variables before the server starts: `OUTLOOK_MCP_FONT_FAMILY`, `OUTLOOK_MCP_FONT_SIZE_PT`,
-`OUTLOOK_MCP_FONT_COLOR`, or `OUTLOOK_MCP_PLAIN_TEXT=1` for plain text.
+### Reading attachments
+
+`read_attachment` pulls the text out of PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx),
+CSV, plain-text, HTML and attached-message (.msg) files so Claude can answer "what does the lease
+say about assignment" without anyone opening the file. The attachment is copied to a temporary
+folder, read, and deleted; nothing in the mailbox changes. Long files are capped (default 20,000
+characters) and the result says so; ask for a page range (`pages="1-3"`) or one sheet
+(`sheet="Summary"`) instead of raising the cap. Scanned PDFs have no text layer and are reported
+as such; old `.doc`/`.xls`/`.ppt` files are not supported.
+
+### Checking that it works
+
+`health_check` reports the server version, whether Outlook is reachable, which accounts are
+loaded and which is the default, the current settings, and whether Outlook is blocking address
+access behind its permission prompt. It is the first thing to run when something fails,
+particularly from a phone where the laptop screen cannot be seen.
 
 ## How it works
 
@@ -253,10 +301,15 @@ Register from source the same way as x64.
 Once registered, just talk to Claude naturally:
 
 - *"Show me my 10 most recent inbox emails"*
+- *"When did we last hear from Chad, and do we have anything on the calendar with him?"*
+- *"What does the lease in Mitch's email say about assignment?"* — read straight from the PDF attachment
+- *"Make my HGP mailbox the default account"*
 - *"Read the email from Taylor about MLADS and give me the whole thread"*
 - *"What's on all my calendars this week?"*
 - *"Save the attachment from that email to my Downloads folder"*
 - *"Draft a reply to Taylor saying I can do Thursday"* — the reply is saved to Drafts; you press Send
+- *"Change that draft to say Friday instead"* — the same draft is updated, not a second one
+- *"Is the Outlook connector working?"* — `health_check`
 - *"Draft an email to alice@example.com about the project update"*
 - *"Set up a 30-minute meeting with bob@example.com tomorrow at 2pm"* — the invitation is on your calendar, unsent; you press Send
 - *"Create a task to review the quarterly report, due Friday, high importance"*
@@ -282,7 +335,7 @@ Once registered, just talk to Claude naturally:
 outlook-desktop-mcp/
   src/outlook_desktop_mcp/
     entrypoint.py            # Windows check → server
-    server.py                # The MCP server (32 tools, COM automation, drafts only)
+    server.py                # The MCP server (39 tools, COM automation, drafts only)
     com_bridge.py            # Async-to-COM threading bridge
     tools/
       _folder_constants.py   # Outlook enums and constants
@@ -293,12 +346,16 @@ outlook-desktop-mcp/
       text.py                # Quoted-history trimming, external-sender banner removal (pure)
       dates.py               # pywintypes → ISO 8601 with offset (pure)
       addresses.py           # Exchange DN → SMTP resolution, recipients
-      html.py                # Draft font styling, injecting text above signature/quoted history (pure)
+      html.py                # Draft font styling, note markers, injecting text above signature/quoted history (pure)
+      settings.py            # Settings file + env var resolution (pure)
+      extract.py             # Text out of PDF/Word/Excel/PowerPoint/CSV attachments (pure)
       errors.py              # COM error formatting
   tests/
     test_text.py             # unit: trimming (no Outlook)
     test_dates.py            # unit: ISO dates (no Outlook)
     test_html.py             # unit: draft HTML (no Outlook)
+    test_settings.py         # unit: settings resolution (no Outlook)
+    test_extract.py          # unit: attachment text extraction (no Outlook)
     live_check.py            # live: the fork's additions over stdio, reads only, changes nothing
     phase1_com_test.py       # Email COM validation (writes a draft, sends nothing)
     phase3_mcp_test.py       # Email MCP test (writes a draft, sends nothing)
