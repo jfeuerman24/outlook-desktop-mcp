@@ -29,9 +29,10 @@ import tempfile
 
 from outlook_desktop_mcp import __version__
 
-from outlook_desktop_mcp.tools.calendars import describe_calendars, resolve_calendars
+from outlook_desktop_mcp.tools import calendars as calendars_mod
+from outlook_desktop_mcp.tools.calendars import describe_calendars, is_people_calendar, resolve_calendars
 from outlook_desktop_mcp.tools.conversation import conversation_items
-from outlook_desktop_mcp.utils import settings
+from outlook_desktop_mcp.utils import dasl, deadline, settings
 from outlook_desktop_mcp.utils.addresses import format_recipients, get_smtp, sender_matches
 from outlook_desktop_mcp.utils.dates import iso
 from outlook_desktop_mcp.utils.extract import extract
@@ -48,6 +49,7 @@ from outlook_desktop_mcp.tools._folder_constants import (
     OL_FOLDER_DRAFTS,
     OL_FOLDER_TASKS,
     OL_MEETING,
+    OL_NON_MEETING,
     OL_REQUIRED,
     OL_OPTIONAL,
     OL_TASK_ITEM,
@@ -78,12 +80,8 @@ logger = logging.getLogger("outlook_desktop_mcp")
 # --- Security helpers ---
 
 def _safe_dasl(query: str) -> str:
-    """Sanitize a string for use in a DASL LIKE filter value.
-    Escapes SQL wildcards (% and _) so user input is treated as literals,
-    then escapes quote characters required by DASL syntax.
-    """
-    query = query.replace("%", "[%]").replace("_", "[_]")
-    return query.replace("'", "''").replace('"', '""')
+    """Sanitize a string for use in a DASL LIKE filter value (see utils.dasl)."""
+    return dasl.escape_like(query)
 
 
 # Outlook item Class constants (olObjectClass — distinct from olItemType used in CreateItem)
@@ -119,16 +117,27 @@ _INSTRUCTIONS = (
     "This MCP server gives access to Microsoft Outlook Desktop on Windows via "
     "COM automation. It can read, search and organise mail, calendars and "
     "tasks, and it can WRITE DRAFTS.\n\n"
-    "NOTHING THIS SERVER DOES SENDS A MESSAGE. draft_email, draft_reply and "
-    "draft_meeting save the item (to Drafts, or to the calendar with invitations "
-    "unsent) and by default open it in an Outlook window; the user reads it and "
-    "presses Send themselves. There is no tool to send, to respond to an "
-    "invitation, or to cancel a meeting the user organised, because each of those "
+    "NOTHING THIS SERVER DOES SENDS A MESSAGE. draft_email, draft_reply, draft_forward "
+    "and draft_meeting save the item (to Drafts, or to the calendar with invitations "
+    "unsent); it opens in an Outlook window only if the open_drafts setting is on. The "
+    "user reads it and presses Send themselves. There is no tool to send, to respond to "
+    "an invitation, or to cancel a meeting the user organised, because each of those "
     "would send. Tell the user where the draft is and that they need to send it.\n\n"
     + _INSTRUCTIONS_COMMON
-    + "AVAILABLE TOOL CATEGORIES:\n"
-    "- Email: list, read, search (with sender filter), get_conversation, "
-    "draft_email, draft_reply, mark read/unread, move, attachments\n"
+    + "FINDING MAIL QUICKLY. Outlook filters by sender, recipient, subject and date in "
+    "well under a second even in a 10,000-message folder, so prefer those: search_emails "
+    "with sender= (a name, address or domain) and/or a subject word, in the default "
+    "account first. Widen to account=\"all\" only if that finds nothing, and say so. "
+    "Body-text search (include_body=true) opens every message and can take 10 to 30 "
+    "seconds per large folder: use it last, with a date range. contact_history sweeps "
+    "every account and calendar: use it for one specific person after a targeted search, "
+    "not as the first move, and give it a full name, address or domain rather than a "
+    "short first name. A result with \"partial\": true stopped at the time limit; narrow "
+    "the request instead of repeating it.\n\n"
+    "AVAILABLE TOOL CATEGORIES:\n"
+    "- Email: list, read, search (sender/subject/body filters), get_conversation, "
+    "contact_history, draft_email, draft_reply, draft_forward, update_draft, "
+    "mark read/unread, move, attachments\n"
     "- Calendar: list_calendars, list events, create appointments, draft_meeting "
     "(invitations unsent), update, delete (not organised meetings), search events\n"
     "- Tasks: create, list, complete, delete to-do items\n"
@@ -229,6 +238,39 @@ def _visible_stores(namespace) -> list:
     return out
 
 
+_EXCHANGE_SHARED_MAILBOX = 1  # OlExchangeStoreType.olExchangeMailbox: a mailbox added to the profile (shared/delegate)
+
+
+def _is_shared_uncached(store) -> bool:
+    """A shared Exchange mailbox that is not cached locally. Every folder listing in it
+    is a server round trip; finding its calendars alone was measured at 18 to 30 s."""
+    try:
+        return int(store.ExchangeStoreType) == _EXCHANGE_SHARED_MAILBOX and not bool(store.IsCachedExchange)
+    except Exception:
+        return False
+
+
+def _sweep_stores(namespace) -> tuple[list, list]:
+    """``(stores, skipped)`` for account="all": the visible stores minus shared uncached
+    mailboxes, unless the include_shared_in_all setting is on. ``skipped`` holds
+    ``{"display_name", "reason"}`` per store left out so the caller can say so."""
+    stores, skipped = [], []
+    include_shared = bool(settings.get("include_shared_in_all"))
+    for store in _visible_stores(namespace):
+        if not include_shared and _is_shared_uncached(store):
+            skipped.append({"display_name": str(store.DisplayName),
+                            "reason": "shared mailbox, not cached locally (slow). Name it explicitly to "
+                                      "search it, or set include_shared_in_all=true."})
+            continue
+        stores.append(store)
+    return stores, skipped
+
+
+def _legacy() -> bool:
+    """The legacy_mode setting: run the pre-0.6 search paths."""
+    return bool(settings.get("legacy_mode"))
+
+
 def _require_store(namespace, account: str = ""):
     """Resolve store, raising ValueError if not found."""
     store = _resolve_store(namespace, account)
@@ -318,10 +360,12 @@ async def list_accounts(include_hidden: bool = False) -> str:
 
     Returns a JSON array of account objects with display_name, store_id,
     is_default (the account tools use when none is named; see the
-    default_account setting) and is_outlook_default. Accounts named in the
-    hide_accounts setting are left out unless include_hidden is true. Use the
-    display_name (or a unique substring) as the 'account' parameter in other
-    tools, or "all" where a tool accepts it.
+    default_account setting), is_outlook_default, shared_uncached (a shared
+    Exchange mailbox not cached locally, slow to search) and in_all_sweeps
+    (whether account="all" includes it). Accounts named in the hide_accounts
+    setting are left out unless include_hidden is true. Use the display_name
+    (or a unique substring) as the 'account' parameter in other tools, or
+    "all" where a tool accepts it.
 
     Args:
         include_hidden: Also list accounts hidden by the hide_accounts setting.
@@ -333,17 +377,21 @@ async def list_accounts(include_hidden: bool = False) -> str:
         outlook_default_id = str(namespace.DefaultStore.StoreID)
         tools_default = _resolve_store(namespace, "")
         tools_default_id = str(tools_default.StoreID) if tools_default is not None else outlook_default_id
+        include_shared = bool(settings.get("include_shared_in_all"))
         results = []
         for i in range(namespace.Stores.Count):
             store = namespace.Stores.Item(i + 1)
             hidden = _is_hidden_store(store)
             if hidden and not include_hidden:
                 continue
+            shared = _is_shared_uncached(store)
             entry = {
                 "display_name": store.DisplayName,
                 "store_id": store.StoreID,
                 "is_default": str(store.StoreID) == tools_default_id,
                 "is_outlook_default": str(store.StoreID) == outlook_default_id,
+                "shared_uncached": shared,
+                "in_all_sweeps": (not hidden) and (include_shared or not shared),
             }
             if include_hidden:
                 entry["hidden"] = hidden
@@ -480,8 +528,9 @@ async def draft_email(
     conversation, not discover them in Outlook.
 
     The draft is saved in the chosen account's Drafts folder, with the user's
-    signature below the text, and by default opened in an Outlook window so the
-    user can read it and press Send themselves. The text is written as HTML in
+    signature below the text, for the user to open, read and press Send
+    themselves (it opens in an Outlook window only if the open_drafts setting
+    or open_in_outlook says so). The text is written as HTML in
     the user's default font (Aptos 12 pt black unless the OUTLOOK_MCP_FONT_*
     environment variables say otherwise). Write the body as normal prose with
     blank lines between paragraphs. Light structure is rendered properly: lines
@@ -536,55 +585,98 @@ async def draft_email(
 # TOOL 2: list_emails
 # =====================================================================
 
-def _stores_for(namespace, account: str) -> list:
-    """``[store]`` for one account, or every visible store for account="all"."""
+def _stores_for(namespace, account: str) -> tuple[list, list]:
+    """``([store], [])`` for one account; for account="all" the swept stores and the
+    ones skipped (see _sweep_stores)."""
     if (account or "").strip().lower() == "all":
-        return _visible_stores(namespace)
-    return [_require_store(namespace, account)]
+        return _sweep_stores(namespace)
+    return [_require_store(namespace, account)], []
 
 
 def _collect_across_stores(namespace, stores, folder: str, include_subfolders: bool,
                            restriction: str, count: int, sender: str):
-    """Summaries newest-first across ``stores``; each tagged with its account when
-    more than one store is searched. Returns a JSON error string when a single
-    named store lacks the folder; with several stores, stores without it are skipped."""
+    """``(summaries, partial)`` newest-first across ``stores``, each tagged with its
+    account when more than one store is searched. Returns a JSON error string when a
+    single named store lacks the folder; with several stores, stores without it are
+    skipped. ``partial`` is true when the time limit stopped the search early."""
     merged = []
+    partial = False
     for store in stores:
+        if deadline.expired():
+            partial = True
+            break
         target = _resolve_folder(namespace, folder, store)
         if not target:
             if len(stores) == 1:
-                return json.dumps({"error": f"Folder '{folder}' not found"})
+                return json.dumps({"error": f"Folder '{folder}' not found"}), False
             continue
         folders = []
         if include_subfolders:
             _folder_subtree(target, folders)
         else:
             folders.append(target)
-        found = _collect_summaries(folders, restriction, count, sender)
+        found, cut = _collect_summaries(folders, restriction, count, sender)
+        partial = partial or cut
         if len(stores) > 1:
             for r in found:
                 r["account"] = str(store.DisplayName)
         merged.extend(found)
     merged.sort(key=lambda r: r.get("received_time") or "", reverse=True)
-    return merged[:count]
+    return merged[:count], partial
 
 
-def _collect_summaries(folders, restriction: str, count: int, sender: str) -> list:
-    """Newest-first summaries across ``folders`` (restricted, optional sender filter)."""
+def _restrict_chain(items, filters):
+    """Apply each non-empty filter in turn. Jet and DASL filters may be mixed this way."""
+    for flt in filters:
+        if flt:
+            items = items.Restrict(flt)
+    return items
+
+
+def _collect_summaries(folders, restriction: str, count: int, sender: str) -> tuple[list, bool]:
+    """``(summaries, partial)`` newest-first across ``folders``.
+
+    ``restriction`` (Jet or DASL) is applied by Outlook. So is the sender filter: a
+    chained DASL restrict on the sender's name, directory address and SMTP address,
+    which Outlook evaluates in well under a second on a 10,000-message folder. If
+    Outlook rejects that filter, or legacy_mode is on, the old path runs instead:
+    walk up to ``_SENDER_SCAN_LIMIT`` messages and match the sender in Python, which
+    is slow and only sees the newest messages.
+    """
     results = []
+    partial = False
+    sender_dasl = dasl.sql(dasl.sender_filter(sender)) if sender else ""
     for target in folders:
+        if deadline.expired():
+            partial = True
+            break
         items = target.Items
         items.Sort("[ReceivedTime]", True)
-        if restriction:
-            items = items.Restrict(restriction)
-        scan = _SENDER_SCAN_LIMIT if sender else count
+        native = False
+        try:
+            if sender_dasl and not _legacy():
+                items = _restrict_chain(items, [restriction, sender_dasl])
+                native = True
+            elif restriction:
+                items = items.Restrict(restriction)
+        except Exception as e:
+            logger.warning("Native sender filter rejected (%s); scanning '%s' in Python instead",
+                           e, _safe_get(lambda: target.Name, "?"))
+            items = target.Items
+            items.Sort("[ReceivedTime]", True)
+            if restriction:
+                items = items.Restrict(restriction)
+            native = False
+        scan = count if (native or not sender) else _SENDER_SCAN_LIMIT
         matched = 0
         for item in _iter_items(items, scan):
+            if deadline.expired():
+                partial = True
+                break
             try:
                 if int(item.Class) != _OL_CLASS_MAIL:
                     continue
-                smtp = get_smtp(item)
-                if sender and not sender_matches(item, sender, smtp):
+                if sender and not native and not sender_matches(item, sender, get_smtp(item)):
                     continue
                 results.append(format_email_summary(item))
                 matched += 1
@@ -593,7 +685,30 @@ def _collect_summaries(folders, restriction: str, count: int, sender: str) -> li
             except Exception:
                 continue
     results.sort(key=lambda r: r.get("received_time") or "", reverse=True)
-    return results[:count]
+    return results[:count], partial
+
+
+def _results_json(results: list, partial: bool, skipped: list) -> str:
+    """A plain JSON array when the search completed over every account it was asked
+    for; otherwise an object with the array under "results" plus "partial" and/or
+    "accounts_skipped", so the caller knows what it did not see."""
+    if not partial and not skipped:
+        return json.dumps(results, indent=2, default=str)
+    out: dict = {"results": results}
+    if partial:
+        out["partial"] = True
+        out["note"] = deadline.partial_note()
+    if skipped:
+        out["accounts_skipped"] = skipped
+    return json.dumps(out, indent=2, default=str)
+
+
+def _sent_summary(item, account_name: str) -> dict:
+    r = format_email_summary(item)
+    r["account"] = account_name
+    r["direction"] = "sent"
+    r["sent_time"] = iso(_safe_get(lambda: item.SentOn, None))
+    return r
 
 
 @mcp.tool()
@@ -636,15 +751,18 @@ async def list_emails(
             (e.g. the whole Inbox tree). Default false.
         account: Optional. Account display name (or substring) to target, or
             "all" for every account at once (each result then carries its
-            account). Default: the default account.
+            account; shared mailboxes that are not cached locally are skipped
+            and listed under accounts_skipped). Default: the default account.
 
     Returns:
-        JSON array of email summary objects.
+        JSON array of email summary objects. If the time limit cut the search
+        short or accounts were skipped, an object {"results": [...],
+        "partial": true, "note": ..., "accounts_skipped": [...]} instead.
     """
     def _list(outlook, namespace, folder, count, unread_only, start_date, end_date,
               sender, include_subfolders, account):
         count = min(max(1, count), 200)
-        stores = _stores_for(namespace, account)
+        stores, skipped = _stores_for(namespace, account)
 
         # Build restriction filters
         restrictions = []
@@ -660,11 +778,11 @@ async def list_emails(
             # Default end to now when start is specified
             restrictions.append(f"[ReceivedTime] <= '{datetime.now().strftime('%m/%d/%Y %H:%M')}'")
 
-        results = _collect_across_stores(namespace, stores, folder, include_subfolders,
-                                         " AND ".join(restrictions), count, sender)
+        results, partial = _collect_across_stores(namespace, stores, folder, include_subfolders,
+                                                  " AND ".join(restrictions), count, sender)
         if isinstance(results, str):
             return results
-        return json.dumps(results, indent=2, default=str)
+        return _results_json(results, partial, skipped)
 
     try:
         return await bridge.call(_list, folder, count, unread_only, start_date, end_date,
@@ -969,9 +1087,10 @@ async def draft_reply(
     conversation, not discover them in Outlook.
 
     Creates Outlook's normal reply (recipients filled in, quoted history and
-    signature below), puts the text above it in the user's default font, saves
-    it to Drafts, and by default opens it in an Outlook window so the user can
-    read it and press Send themselves.
+    signature below), puts the text above it in the user's default font and
+    saves it to Drafts for the user to read and press Send themselves (it opens
+    in an Outlook window only if the open_drafts setting or open_in_outlook
+    says so).
 
     Args:
         entry_id: The unique Outlook EntryID of the email to reply to.
@@ -1286,6 +1405,45 @@ async def list_folders(folder: str = "", max_depth: int = 3, account: str = "") 
 # TOOL 9: search_emails
 # =====================================================================
 
+_BODY_INDEX: dict = {"checked": False, "ok": False, "detail": "not probed yet"}
+
+
+def _body_index_ok(namespace) -> bool:
+    """Once per process: can Outlook's indexed phrase match find words inside message
+    bodies on this machine? It needs Windows Search to have indexed Outlook's bodies; on
+    some PCs it silently returns nothing, so the fast operator is used only after it
+    proves itself. Probes with a word from a recent message in the default inbox."""
+    if _BODY_INDEX["checked"]:
+        return _BODY_INDEX["ok"]
+    _BODY_INDEX["checked"] = True
+    try:
+        store = _resolve_store(namespace, "")
+        items = store.GetDefaultFolder(OL_FOLDER_INBOX).Items
+        items.Sort("[ReceivedTime]", True)
+        probe = None
+        for item in _iter_items(items, 15):  # the oldest of these: least likely to be awaiting indexing
+            try:
+                words = re.findall(r"[A-Za-z]{7,}", str(item.Body or "")[:3000])
+            except Exception:
+                continue
+            if words:
+                probe = (str(item.EntryID), words[len(words) // 2])
+        if probe is None:
+            _BODY_INDEX["detail"] = "no recent message with body text to probe with"
+            return False
+        entry_id, word = probe
+        hits = items.Restrict(dasl.sql(dasl.body_filter(word, indexed=True)))
+        found = any(str(_safe_get(lambda h=h: h.EntryID) or "") == entry_id for h in _iter_items(hits, 300))
+        _BODY_INDEX["ok"] = found
+        _BODY_INDEX["detail"] = (f"probe word {word!r} {'found' if found else 'not found'} by the index; "
+                                 + ("body searches use the index (fast)" if found else
+                                    "body searches scan every message (slow); sender/subject searches are unaffected"))
+        return found
+    except Exception as e:
+        _BODY_INDEX["detail"] = f"probe failed: {e}"
+        return False
+
+
 @mcp.tool()
 async def search_emails(
     query: str = "",
@@ -1295,73 +1453,81 @@ async def search_emails(
     end_date: str = "",
     sender: str = "",
     include_subfolders: bool = False,
+    include_body: bool = False,
     account: str = "",
 ) -> str:
-    """Search for emails in Outlook using text search.
+    """Find emails by sender, subject text and/or date. Fast: Outlook does the
+    filtering, well under a second even in a 10,000-message folder.
 
-    Searches email subjects and bodies using Outlook's DASL filter, optionally
-    limited to one sender. Results are sorted by received time (newest first).
-    Each result includes entry_id for further operations.
+    Start here for "find the email from X" or "the thread about Y". A sender
+    filter alone lists everything from a person or domain; a subject word finds a
+    thread. Results are newest first and each carries an entry_id for read_email,
+    get_conversation or the draft tools.
+
+    include_body=true also scans message text. That opens every message in the
+    folder and takes 10 to 30 seconds per large folder; use it only when sender
+    and subject searches have failed, and add a date range. (Where Windows Search
+    has indexed Outlook's bodies the server detects it and body search is fast.)
 
     Args:
-        query: The search term (case-insensitive substring match on subject or
-            body). Examples: "budget report", "meeting notes". May be empty when
-            'sender' is given, to list everything from that sender.
+        query: Text to find in the subject (case-insensitive substring), e.g.
+            "Sanders", "EHC offer". With include_body also in the message text.
+            May be empty when 'sender' is given.
         folder: Folder to search in. Default "inbox". Supports the same names
             and slash paths as list_emails.
         count: Maximum results to return. Default 10, max 200.
-        start_date: Optional. Only return emails received on or after this date.
-            ISO 8601 format (e.g. "2026-03-10" or "2026-03-10 09:00").
-        end_date: Optional. Only return emails received on or before this date.
-            ISO 8601 format. Default: now (if start_date is provided).
-        sender: Optional. Case-insensitive substring of the sender's email
-            address or display name, e.g. "freestone" or "Linda Harlow".
+        start_date: Optional. Only emails received on or after this date.
+            ISO 8601 (e.g. "2026-03-10" or "2026-03-10 09:00").
+        end_date: Optional. Only emails received on or before this date.
+            ISO 8601. Default: now (if start_date is provided).
+        sender: Optional. Case-insensitive substring of the sender's name or
+            email address, e.g. "castelli", "lou@pennspring.com" or "pennspring".
+            Matches the real SMTP address even for senders inside the user's own
+            organisation.
         include_subfolders: If true, also search every subfolder of 'folder'.
             Default false.
-        account: Optional. Account display name (or substring) to target.
-            Default: primary account. Use list_accounts to see available accounts.
+        include_body: If true, also match 'query' against message text. Slow on
+            big folders (see above). Default false.
+        account: Optional. Account display name (or substring), or "all" for
+            every account (shared mailboxes not cached locally are skipped and
+            listed under accounts_skipped). Default: the default account.
 
     Returns:
-        JSON array of matching email summaries, or an error.
+        JSON array of matching email summaries. If the time limit cut the search
+        short or accounts were skipped, an object {"results": [...],
+        "partial": true, "note": ..., "accounts_skipped": [...]} instead.
     """
     def _search(outlook, namespace, query, folder, count, start_date, end_date,
-                sender, include_subfolders, account):
+                sender, include_subfolders, include_body, account):
         count = min(max(1, count), 200)
         if not query and not sender:
             return json.dumps({"error": "Provide a query, a sender, or both"})
-        stores = _stores_for(namespace, account)
+        stores, skipped = _stores_for(namespace, account)
 
         dasl_parts = []
         if query:
-            safe_query = _safe_dasl(query)
-            dasl_parts.append(
-                f"(\"urn:schemas:httpmail:subject\" LIKE '%{safe_query}%' OR "
-                f"\"urn:schemas:httpmail:textdescription\" LIKE '%{safe_query}%')"
-            )
+            if include_body or _legacy():
+                indexed = (not _legacy()) and _body_index_ok(namespace)
+                dasl_parts.append(dasl.subject_or_body_filter(query, indexed_body=indexed))
+            else:
+                dasl_parts.append(dasl.subject_filter(query))
         if start_date:
-            start = _parse_date(start_date)
-            dasl_parts.append(
-                f"\"urn:schemas:httpmail:datereceived\" >= '{start.strftime('%m/%d/%Y %H:%M')}'"
-            )
+            dasl_parts.append(dasl.received_since(_parse_date(start_date)))
         if end_date:
-            end = _parse_date(end_date)
-            dasl_parts.append(
-                f"\"urn:schemas:httpmail:datereceived\" <= '{end.strftime('%m/%d/%Y %H:%M')}'"
-            )
+            dasl_parts.append(dasl.received_until(_parse_date(end_date)))
         elif start_date:
-            dasl_parts.append(
-                f"\"urn:schemas:httpmail:datereceived\" <= '{datetime.now().strftime('%m/%d/%Y %H:%M')}'"
-            )
+            dasl_parts.append(dasl.received_until(datetime.now()))
 
-        filter_str = ("@SQL=" + " AND ".join(dasl_parts)) if dasl_parts else ""
-        results = _collect_across_stores(namespace, stores, folder, include_subfolders, filter_str, count, sender)
+        filter_str = dasl.sql(*dasl_parts)
+        results, partial = _collect_across_stores(namespace, stores, folder, include_subfolders,
+                                                  filter_str, count, sender)
         if isinstance(results, str):
             return results
-        return json.dumps(results, indent=2, default=str)
+        return _results_json(results, partial, skipped)
 
     try:
         return await bridge.call(_search, query, folder, count, start_date, end_date,
-                                 sender, include_subfolders, account)
+                                 sender, include_subfolders, include_body, account)
     except Exception as e:
         return f"Error searching emails: {format_com_error(e)}"
 
@@ -1401,10 +1567,13 @@ def _events_in(calendars, start: datetime, end: datetime, count: int, subject_qu
             filtered = items.Restrict(restrict)
         except Exception as e:  # one unreadable calendar (e.g. an offline shared mailbox) must not sink the rest
             logger.warning("Calendar '%s' unreadable: %s", label, e)
+            calendars_mod.invalidate()  # the cached folder may be stale
             results.append({"calendar": label, "error": format_com_error(e)})
             continue
         seen: set[tuple[str, str]] = set()
         for item in _iter_items(filtered, _EVENT_SCAN_LIMIT):
+            if deadline.expired():
+                break
             try:
                 if int(item.Class) != _OL_CLASS_APPOINTMENT:
                     continue
@@ -1419,6 +1588,50 @@ def _events_in(calendars, start: datetime, end: datetime, count: int, subject_qu
                 continue
     results.sort(key=lambda r: (r.get("start") or "", r.get("end") or ""))
     return results[:count]
+
+
+def _meetings_with(calendars, start: datetime, end: datetime, needle_lower: str, limit: int = 500) -> tuple[list, bool]:
+    """``(events, partial)``: meetings in [start, end] whose organizer or attendee strings
+    contain ``needle_lower``. Outlook first drops plain appointments (no attendees), then
+    only three fields are read per remaining item and only matches are fully formatted.
+    contact_history used to format up to 2,000 occurrences per calendar before matching."""
+    results: list = []
+    partial = False
+    for label, folder in calendars:
+        if deadline.expired():
+            partial = True
+            break
+        try:
+            items = folder.Items
+            items.Sort("[Start]")
+            items.IncludeRecurrences = True
+            restrict = (f"[Start] <= '{dasl.jet_date(end)}' AND [End] >= '{dasl.jet_date(start)}' "
+                        f"AND [MeetingStatus] <> {OL_NON_MEETING}")
+            filtered = items.Restrict(restrict)
+        except Exception as e:
+            logger.warning("Calendar '%s' unreadable: %s", label, e)
+            calendars_mod.invalidate()
+            continue
+        seen: set[tuple[str, str]] = set()
+        for item in _iter_items(filtered, _EVENT_SCAN_LIMIT):
+            if deadline.expired():
+                partial = True
+                break
+            try:
+                who = " ".join(str(_safe_get(lambda a=a: getattr(item, a)) or "")
+                               for a in ("Organizer", "RequiredAttendees", "OptionalAttendees")).lower()
+                if needle_lower not in who:
+                    continue
+                key = (str(item.EntryID), str(item.Start))
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append(format_event_summary(item, label))
+                if len(results) >= limit:
+                    return results, partial
+            except Exception:
+                continue
+    return results, partial
 
 
 # =====================================================================
@@ -1647,9 +1860,9 @@ async def draft_meeting(
     conversation, not discover them in Outlook.
 
     The meeting is saved on the user's calendar with the attendees filled in
-    and invitations unsent (Outlook marks it "invitations have not been sent"),
-    and by default opened in an Outlook window so the user can check it and
-    press Send themselves.
+    and invitations unsent (Outlook marks it "invitations have not been sent")
+    for the user to check and press Send themselves (it opens in an Outlook
+    window only if the open_drafts setting or open_in_outlook says so).
 
     Args:
         subject: The meeting title.
@@ -2397,7 +2610,8 @@ async def get_settings() -> str:
     tools use when none is named.
 
     Settings: default_account, hide_accounts, open_drafts, font_family,
-    font_size_pt, font_color, plain_text. Each value comes from an environment
+    font_size_pt, font_color, plain_text, include_shared_in_all, call_timeout_s,
+    legacy_mode. Each value comes from an environment
     variable (set in Claude's config), the settings file (written by
     set_setting), or the built-in default; "source" says which. Change one with
     set_setting.
@@ -2436,6 +2650,12 @@ async def set_setting(key: str, value: str = "", clear: bool = False) -> str:
         open_drafts: "true" to open each new draft in an Outlook window,
             "false" to only save it.
         font_family, font_size_pt, font_color, plain_text: how draft text is written.
+        include_shared_in_all: "true" to include shared, non-cached mailboxes in
+            account="all" searches (slow); default false.
+        call_timeout_s: seconds a tool call may take (default 60); long searches
+            return partial results just before it.
+        legacy_mode: "true" to run the pre-0.6 (slow) search paths; for
+            troubleshooting only.
 
     Args:
         key: One of the keys above.
@@ -2595,21 +2815,30 @@ async def contact_history(
     last and next meetings with them. Looks across every account (unless one is
     named), the whole Inbox tree, Sent Items and every calendar.
 
+    This is the broadest search the server offers. Use it for one specific
+    person once you know who they are, not as the first move for "find the
+    email about X" (use search_emails with sender= or a subject word for that).
+    Give it something specific: a surname, a full name, an address or a domain.
+    A short first name like "dan" matches every Dan, Dante and Jordan.
+
     Args:
-        person: Part of the person's name or email address, e.g. "chad" or
-            "tworld.com". Case-insensitive.
+        person: Part of the person's name or email address, e.g. "castelli",
+            "lou@pennspring.com" or "pennspring.com". Case-insensitive.
         days: How far back to look. Default 365.
         count: Messages to return per direction per account (and in the merged
             timeline). Default 10, max 50.
-        account: "all" (default) for every visible account, or one account's
-            display name (or substring).
+        account: "all" (default) for every visible account (shared mailboxes not
+            cached locally are skipped and listed under accounts_skipped), or
+            one account's display name (or substring).
         include_meetings: Also scan calendars for meetings with this person.
             Default true.
 
     Returns:
         JSON with last_received, last_sent, received_count, sent_count, recent
-        (merged timeline, newest first, each tagged direction and account) and
-        meetings {last, next, past_count, upcoming_count}.
+        (merged timeline, newest first, each tagged direction and account),
+        meetings {last, next, past_count, upcoming_count}, accounts_searched and
+        accounts_skipped. "partial": true means the time limit stopped the sweep;
+        narrow it (one account, fewer days) rather than repeating it.
     """
     def _history(outlook, namespace, person, days, count, account, include_meetings):
         needle = (person or "").strip()
@@ -2620,87 +2849,136 @@ async def contact_history(
         days = min(max(1, int(days)), 3650)
         now = datetime.now()
         since = now - timedelta(days=days)
-        stores = _visible_stores(namespace) if (account or "").strip().lower() == "all" else [_require_store(namespace, account)]
-        safe = _safe_dasl(needle)
-        stamp = since.strftime('%m/%d/%Y %H:%M')
+        legacy = _legacy()
+        if (account or "").strip().lower() == "all":
+            stores, skipped = _sweep_stores(namespace)
+        else:
+            stores, skipped = [_require_store(namespace, account)], []
+        stamp = dasl.jet_date(since)
         received: list = []
         sent: list = []
         searched = []
+        partial = False
         for store in stores:
+            if deadline.expired():
+                partial = True
+                break
             name = str(store.DisplayName)
             searched.append(name)
-            # Received: Inbox tree, matched on sender name or address by Outlook itself.
+            # Received: Inbox tree, matched by Outlook on sender name, directory address
+            # and SMTP address.
             folders: list = []
             try:
                 _folder_subtree(store.GetDefaultFolder(OL_FOLDER_INBOX), folders)
             except Exception:
                 folders = []
-            dasl = ('@SQL=("urn:schemas:httpmail:fromname" LIKE \'%' + safe + '%\' OR '
-                    '"urn:schemas:httpmail:fromemail" LIKE \'%' + safe + '%\') AND '
-                    '"urn:schemas:httpmail:datereceived" >= \'' + stamp + '\'')
-            for r in _collect_summaries(folders, dasl, count, ""):
+            received_filter = dasl.sql(dasl.sender_filter(needle), dasl.received_since(since))
+            found, cut = _collect_summaries(folders, received_filter, count, "")
+            partial = partial or cut
+            for r in found:
                 r["account"] = name
                 r["direction"] = "received"
                 received.append(r)
-            # Sent: scan Sent Items newest-first within the window, matching To/CC/BCC names or addresses.
+
+            # Sent: Outlook matches the To/CC/BCC display strings. Those hold names, so
+            # the names this person has written under are searched alongside the needle
+            # (an address needle alone would miss "Lou Castelli"). Python walks Sent
+            # Items only when Outlook rejects the filter, in legacy mode, or when an
+            # address-like needle found nothing natively.
+            known_names: list[str] = []
+            for r in received:
+                n = str(r.get("sender_name") or "").strip()
+                if n and n.lower() not in (k.lower() for k in known_names) and len(known_names) < 6:
+                    known_names.append(n)
             try:
                 items = store.GetDefaultFolder(OL_FOLDER_SENT_MAIL).Items
                 items.Sort("[SentOn]", True)
                 items = items.Restrict(f"[SentOn] >= '{stamp}'")
             except Exception:
                 items = None
-            matched = 0
-            for item in (_iter_items(items, _SENDER_SCAN_LIMIT) if items is not None else []):
+            sent_here: list = []
+            native_ok = False
+            if items is not None and not legacy:
                 try:
-                    if int(item.Class) != _OL_CLASS_MAIL:
-                        continue
-                    hay = " ".join(str(_safe_get(lambda a=a: getattr(item, a)) or "") for a in ("To", "CC", "BCC")).lower()
-                    hit = needle_lower in hay
-                    if not hit:
-                        for rec in format_recipients(item):
-                            if needle_lower in (rec.get("address") or "") or needle_lower in (rec.get("name") or "").lower():
-                                hit = True
-                                break
-                    if not hit:
-                        continue
-                    r = format_email_summary(item)
-                    r["account"] = name
-                    r["direction"] = "sent"
-                    r["sent_time"] = iso(_safe_get(lambda: item.SentOn, None))
-                    sent.append(r)
-                    matched += 1
-                    if matched >= count:
+                    native = items.Restrict(dasl.sql(dasl.recipient_filter([needle] + known_names)))
+                    native_ok = True
+                    for item in _iter_items(native, count):
+                        if deadline.expired():
+                            partial = True
+                            break
+                        try:
+                            if int(item.Class) != _OL_CLASS_MAIL:
+                                continue
+                            sent_here.append(_sent_summary(item, name))
+                        except Exception:
+                            continue
+                except Exception as e:
+                    logger.warning("Native recipient filter rejected (%s); scanning Sent Items in Python", e)
+                    native_ok = False
+            scan_python = items is not None and (
+                legacy or not native_ok or (not sent_here and dasl.looks_like_address(needle)))
+            if scan_python and not deadline.expired():
+                limit = _SENDER_SCAN_LIMIT if legacy else _SENDER_SCAN_LIMIT // 2
+                matched = 0
+                for item in _iter_items(items, limit):
+                    if deadline.expired():
+                        partial = True
                         break
-                except Exception:
-                    continue
+                    try:
+                        if int(item.Class) != _OL_CLASS_MAIL:
+                            continue
+                        hay = " ".join(str(_safe_get(lambda a=a: getattr(item, a)) or "") for a in ("To", "CC", "BCC")).lower()
+                        hit = needle_lower in hay
+                        if not hit:
+                            for rec in format_recipients(item):
+                                if needle_lower in (rec.get("address") or "") or needle_lower in (rec.get("name") or "").lower():
+                                    hit = True
+                                    break
+                        if not hit:
+                            continue
+                        sent_here.append(_sent_summary(item, name))
+                        matched += 1
+                        if matched >= count:
+                            break
+                    except Exception:
+                        continue
+            sent.extend(sent_here)
         received.sort(key=lambda r: r.get("received_time") or "", reverse=True)
         sent.sort(key=lambda r: r.get("sent_time") or r.get("received_time") or "", reverse=True)
         timeline = sorted(received + sent, key=lambda r: r.get("sent_time") or r.get("received_time") or "", reverse=True)[:count]
 
         meetings = None
-        if include_meetings:
+        if include_meetings and not deadline.expired():
             past: list = []
             upcoming: list = []
             horizon = now + timedelta(days=90)
             for store in stores:
+                if deadline.expired():
+                    partial = True
+                    break
                 try:
                     calendars = resolve_calendars(store, "all")
                 except Exception:
                     continue
-                for ev in _events_in(calendars, since, horizon, 500):
-                    if ev.get("error"):
-                        continue
-                    who = " ".join(str(ev.get(k) or "") for k in ("organizer", "required_attendees", "optional_attendees")).lower()
-                    if needle_lower not in who:
-                        continue
+                if legacy:
+                    events = [ev for ev in _events_in(calendars, since, horizon, 500) if not ev.get("error")]
+                    events = [ev for ev in events if needle_lower in " ".join(
+                        str(ev.get(k) or "") for k in ("organizer", "required_attendees", "optional_attendees")).lower()]
+                else:
+                    calendars = [(p, f) for p, f in calendars if is_people_calendar(p)]
+                    events, cut = _meetings_with(calendars, since, horizon, needle_lower)
+                    partial = partial or cut
+                for ev in events:
                     ev["account"] = str(store.DisplayName)
                     (upcoming if (ev.get("start") or "") >= now.isoformat(timespec="minutes") else past).append(ev)
             past.sort(key=lambda e: e.get("start") or "")
             upcoming.sort(key=lambda e: e.get("start") or "")
             meetings = {"last": past[-1] if past else None, "next": upcoming[0] if upcoming else None,
                         "past_count": len(past), "upcoming_count": len(upcoming)}
+        elif include_meetings:
+            partial = True
 
-        return json.dumps({
+        out = {
             "person": needle,
             "window_days": days,
             "accounts_searched": searched,
@@ -2711,7 +2989,13 @@ async def contact_history(
             "counts_note": f"Counts are capped at {count} per direction per account; raise count for more.",
             "recent": timeline,
             "meetings": meetings,
-        }, indent=2, default=str)
+        }
+        if skipped:
+            out["accounts_skipped"] = skipped
+        if partial:
+            out["partial"] = True
+            out["note"] = deadline.partial_note("The sweep")
+        return json.dumps(out, indent=2, default=str)
 
     try:
         return await bridge.call(_history, person, days, count, account, include_meetings)
@@ -2894,19 +3178,27 @@ async def health_check() -> str:
     def _basic(outlook, namespace):
         stores = []
         default_id = str(namespace.DefaultStore.StoreID)
+        include_shared = bool(settings.get("include_shared_in_all"))
         for i in range(namespace.Stores.Count):
             store = namespace.Stores.Item(i + 1)
+            hidden = _is_hidden_store(store)
+            shared = _is_shared_uncached(store)
             stores.append({
                 "display_name": str(store.DisplayName),
                 "is_outlook_default": str(store.StoreID) == default_id,
-                "hidden": _is_hidden_store(store),
+                "hidden": hidden,
+                "shared_uncached": shared,
+                "in_all_sweeps": (not hidden) and (include_shared or not shared),
             })
         tools_default = _resolve_store(namespace, "")
+        _body_index_ok(namespace)
         return {
             "outlook_running": True,
             "outlook_version": str(_safe_get(lambda: outlook.Version) or ""),
             "accounts": stores,
             "default_account_for_tools": str(tools_default.DisplayName) if tools_default is not None else None,
+            "body_search_index": _BODY_INDEX["detail"],
+            "legacy_mode": _legacy(),
         }
 
     try:
