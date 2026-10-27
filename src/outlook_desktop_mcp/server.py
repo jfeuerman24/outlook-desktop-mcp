@@ -140,9 +140,11 @@ _INSTRUCTIONS = (
     "CONTEXT BEFORE A REPLY. The user often has not opened the email in Outlook. Before "
     "showing a reply or forward draft, call reply_context on the message and open the "
     "chat preview with a Context block of two to four lines: who is on the thread, what "
-    "has been said, what the newest message asks. Use the To/CC from reply_context, which "
-    "are Outlook's own, not a guess. thread_depth on every message says how deep in a "
-    "thread it sits (0 = first message); get_conversation shows the whole thread.\n\n"
+    "has been said, what the newest message asks. Skip the block when the thread has "
+    "already been summarised in this conversation; do not repeat it. Always use the To/CC "
+    "from reply_context, which are Outlook's own, not a guess. thread_depth on every "
+    "message says how deep in a thread it sits (0 = first message); get_conversation "
+    "shows the whole thread.\n\n"
     + _INSTRUCTIONS_COMMON
     + "FINDING MAIL QUICKLY. Outlook filters by subject, sender, recipient and date in "
     "well under a second even in a 10,000-message folder. For \"find the email about X\" "
@@ -875,6 +877,10 @@ async def read_email(
     to read the earlier messages each once, or include_history=true to get
     the raw body with the quoted chain.
 
+    If the user wants to reply to or forward this message, also call
+    reply_context on it: it returns the To/CC Outlook's own Reply or Reply
+    All would use and says how to present the draft.
+
     Args:
         entry_id: The unique Outlook EntryID of the email. Most reliable way
             to identify a specific email. Get this from list_emails or
@@ -948,6 +954,10 @@ async def get_conversation(
     with its own text only (quoted history removed), so reading the thread
     costs each message once. Deleted Items, Junk, Drafts and Outbox are
     excluded.
+
+    If the user wants to reply to or forward a message here, also call
+    reply_context on it: it returns the To/CC Outlook's own Reply or Reply
+    All would use and says how to present the draft.
 
     Args:
         entry_id: EntryID of any message in the conversation (from list_emails,
@@ -1025,7 +1035,9 @@ async def reply_context(
     opened the email in Outlook, so start the chat preview with a Context block
     of two to four lines (who is on the thread, what has been said, what the
     newest message asks), then the draft with the To/CC from this result, which
-    are Outlook's own rather than a guess.
+    are Outlook's own rather than a guess. Skip the Context block when the
+    thread has already been summarised in this conversation; the To/CC from
+    this result are needed every time.
 
     Args:
         entry_id: EntryID of the message to answer (from list_emails,
@@ -1325,9 +1337,10 @@ async def draft_reply(
     """Write a reply to an email as a draft. It is NOT sent.
 
     BEFORE CALLING THIS: call reply_context on the message, then show the
-    complete draft in the chat (a short Context block about the thread, then
-    recipients, subject and the full text above the quoted thread) and work on
-    it there until the user is happy. Then ask explicitly, as its own question,
+    complete draft in the chat (a short Context block about the thread unless
+    it was already summarised in this conversation, then recipients, subject
+    and the full text above the quoted thread) and work on it there until the
+    user is happy. Then ask explicitly, as its own question,
     whether to put it in Outlook, and call this tool only after the user says
     yes. Never call it as the first step of a "write an email" request. The
     user wants to see and edit drafts in the conversation, not discover them in
@@ -1427,7 +1440,8 @@ async def draft_forward(
 
     BEFORE CALLING THIS: call reply_context on the message so you know the
     thread, then show the complete draft in the chat first (a short Context
-    block about what is being forwarded, recipients, which message is being
+    block about what is being forwarded unless the thread was already
+    summarised in this conversation, recipients, which message is being
     forwarded, the full note that goes above it, and which attachments will
     ride along) and work on it there until the user is happy. Then ask explicitly, as its own question, whether to put it in
     Outlook, and call this tool only after the user says yes. Never call it as

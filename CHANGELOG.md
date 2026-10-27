@@ -3,6 +3,17 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## 0.9.1 - 2026-10-27
+
+### Changed
+- Wording only. `read_email` and `get_conversation` now say to call `reply_context` as well
+  when the user wants to reply or forward: those are the tools Claude loads to read a thread,
+  so they were the only descriptions in front of it while it drafted, and neither mentioned
+  it. The server instructions, `reply_context`, `draft_reply` and `draft_forward` now say to
+  skip the Context block when the thread has already been summarised in the conversation, so
+  the block appears once per thread rather than above every draft; the To/CC from
+  `reply_context` are still to be used every time.
+
 ## 0.9.0 - 2026-10-27
 
 ### Added
