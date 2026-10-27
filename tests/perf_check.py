@@ -1,10 +1,12 @@
 """Timing check for the searches that were slow in real use. Read-only: it changes nothing.
 
 Runs the server over stdio exactly as Claude would and times each call. Needs classic
-Outlook running. The queries mirror two real sessions (a person search across accounts,
-a company search in one account) so before/after numbers are comparable.
+Outlook running. The queries mirror three real sessions (a person search across accounts,
+a company search in one account, and a company name given to contact_history across all
+accounts, which took two minutes in Claude Desktop) so before/after numbers are comparable.
 
 Run:  .venv\\Scripts\\python tests\\perf_check.py [--out results.json] [--account hbs.edu] [--person dan]
+                                               [--company "Earl Gray"] [--domain earlgrayandsons.com]
 
 Each call's wall time includes any wait behind a previous slow call on the COM thread,
 which is what the user experiences.
@@ -57,7 +59,8 @@ def summarize(result):
     return str(type(result).__name__)
 
 
-async def run(account: str, person: str, out_path: str | None):
+async def run(account: str, person: str, out_path: str | None, company: str = "Earl Gray",
+              domain: str = "earlgrayandsons.com"):
     from mcp.client.stdio import stdio_client, StdioServerParameters
     from mcp.client.session import ClientSession
 
@@ -115,6 +118,18 @@ async def run(account: str, person: str, out_path: str | None):
             await call("search_events: 'Sanders' all calendars May-Oct", "search_events",
                        query="Sanders", start_date="2026-05-01", end_date="2026-10-31", calendar="all", account="heartland")
 
+            # --- the Earl Gray session: a company name, which lives in subjects, not in people fields.
+            # Claude Desktop opened with contact_history (four sweeps, 53 s of server time, nothing
+            # found) before a subject search hit. The same three shapes, so the fix is measurable.
+            hist = await call(f"contact_history: '{company}' all accounts (company name)", "contact_history",
+                              person=company, account="all")
+            if isinstance(hist, dict) and hist.get("subject_matches"):
+                log(f"          subject_matches: {len(hist['subject_matches'])} (fallback found the thread)")
+            await call(f"contact_history: '{domain}' all accounts, 730 days", "contact_history",
+                       person=domain, days=730, account="all")
+            await call(f"search: '{company}' folder=all, all accounts (one call)", "search_emails",
+                       query=company, folder="all", account="all", count=10)
+
     total = sum(r["seconds"] for r in rows)
     log(f"\nTOTAL {total:.1f}s over {len(rows)} calls")
     if out_path:
@@ -128,6 +143,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--account", default="hbs.edu", help="account substring for the single-account searches")
     ap.add_argument("--person", default="dan", help="needle for the all-account contact_history")
+    ap.add_argument("--company", default="Earl Gray", help="company name for the contact_history-by-mistake case")
+    ap.add_argument("--domain", default="earlgrayandsons.com", help="that company's email domain")
     ap.add_argument("--out", default=None, help="write a JSON summary here")
     a = ap.parse_args()
-    asyncio.run(run(a.account, a.person, a.out))
+    asyncio.run(run(a.account, a.person, a.out, a.company, a.domain))

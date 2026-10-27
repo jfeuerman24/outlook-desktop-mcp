@@ -90,6 +90,26 @@ def subject_filter(needle: str) -> str:
     return contains(SUBJECT, needle)
 
 
+def people_filter(needle: str, names=None) -> str:
+    """Messages from or to ``needle``: the sender's name or address, or the To/CC/BCC
+    display strings (plus any ``names`` the person is known by). A sender filter alone
+    misses mail where the person is a co-recipient, such as a colleague writing to them
+    with the user copied, and the user's own replies filed outside Sent Items."""
+    return "(" + sender_filter(needle) + " OR " + recipient_filter([needle] + list(names or [])) + ")"
+
+
+def anywhere_filter(needle: str, indexed_body: bool | None = None) -> str:
+    """Subject, sender or recipients containing ``needle``, in one filter Outlook
+    evaluates itself. With ``indexed_body`` not None the body is included too
+    (True = search-index phrase match, False = substring scan of every body)."""
+    parts = [subject_filter(needle), sender_filter(needle)]
+    if len((needle or "").strip()) >= 2:
+        parts.append(recipient_filter([needle]))
+    if indexed_body is not None:
+        parts.append(body_filter(needle, indexed_body))
+    return "(" + " OR ".join(parts) + ")"
+
+
 def body_filter(needle: str, indexed: bool = False) -> str:
     """Body text containing ``needle``. ``indexed`` uses the search index's phrase match
     (whole words, fast) instead of a substring scan of every body (exact, slow)."""

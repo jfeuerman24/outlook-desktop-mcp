@@ -57,6 +57,24 @@ class FilterTests(unittest.TestCase):
         self.assertEqual(dasl.received_since(d), f"\"{dasl.DATE_RECEIVED}\" >= '10/01/2026 00:00'")
         self.assertEqual(dasl.received_until(d), f"\"{dasl.DATE_RECEIVED}\" <= '10/01/2026 00:00'")
 
+    def test_people_filter_covers_sender_and_recipients(self):
+        f = dasl.people_filter("earlgrayandsons.com", ["Mike Gray"])
+        for prop in dasl.SENDER_PROPS + dasl.RECIPIENT_PROPS:
+            self.assertIn(f"\"{prop}\" LIKE '%earlgrayandsons.com%'", f)
+        self.assertEqual(f.count("'%Mike Gray%'"), 3)  # recipients only
+        self.assertTrue(f.startswith("(") and f.endswith(")"))
+
+    def test_anywhere_filter_subject_sender_recipients_and_optional_body(self):
+        f = dasl.anywhere_filter("Earl Gray")
+        self.assertIn(f"\"{dasl.SUBJECT}\" LIKE '%Earl Gray%'", f)
+        self.assertIn(f"\"{dasl.SENDER_SMTP}\" LIKE '%Earl Gray%'", f)
+        self.assertIn(f"\"{dasl.DISPLAY_TO}\" LIKE '%Earl Gray%'", f)
+        self.assertNotIn(dasl.BODY, f)
+        self.assertIn("ci_phrasematch 'Earl Gray'", dasl.anywhere_filter("Earl Gray", indexed_body=True))
+        self.assertIn(f"\"{dasl.BODY}\" LIKE '%Earl Gray%'", dasl.anywhere_filter("Earl Gray", indexed_body=False))
+        # A one-character needle cannot go through the recipient filter (minimum two).
+        self.assertNotIn(dasl.DISPLAY_TO, dasl.anywhere_filter("x"))
+
     def test_looks_like_address(self):
         self.assertTrue(dasl.looks_like_address("lou@pennspring.com"))
         self.assertTrue(dasl.looks_like_address("pennspring.com"))

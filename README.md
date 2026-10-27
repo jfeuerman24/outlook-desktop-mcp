@@ -107,7 +107,7 @@ restart Claude, and delete the folder.
 | **Thread context before a reply.** `reply_context` returns the recipients Outlook's own Reply would address, who is on the thread and a digest of it, so the chat preview starts with context. Every message carries `thread_depth`. `open_in_outlook` opens any item in Outlook on request. | `server.py`, `tools/conversation.py` |
 | **Settings by conversation.** `set_setting` / `get_settings` for the default account, hidden accounts, draft window and font, stored outside the repo. | `utils/settings.py` |
 | **Attachments read in place, files attached from disk.** `read_attachment` (PDF, Word, Excel, PowerPoint, CSV, text, .msg), `add_attachment`, and an `attachments` argument on every draft tool. | `utils/extract.py`, `server.py` |
-| **Fast searches.** Outlook does the filtering (sender, recipient, subject, date) instead of Python walking messages, so a sender search of an 11,000-message inbox takes a second and sees every message. Shared mailboxes that are not cached locally are skipped by `account="all"`. Long searches return partial results before the time limit instead of an error. `legacy_mode` runs the old paths. | `utils/dasl.py`, `utils/deadline.py`, `com_bridge.py`, `server.py` |
+| **Fast searches.** Outlook does the filtering (subject, sender, recipient, date) instead of Python walking messages, so a sender search of an 11,000-message inbox takes a second and sees every message, and "my history with company X" is one `search_emails` call across the Inbox tree, Sent Items and Archive. `contact_history` sees mail where the person was only copied. Shared mailboxes that are not cached locally are skipped by `account="all"`. Long searches return partial results before the time limit instead of an error; every result says how long it took. `legacy_mode` runs the old paths. | `utils/dasl.py`, `utils/deadline.py`, `com_bridge.py`, `server.py` |
 | **One-call lookups.** `contact_history` (one person across every account and calendar), `account="all"` on `list_emails`/`search_emails`, `update_draft`, `health_check`. | `server.py` |
 | **Every calendar, not just the default.** `list_calendars`; `list_events` and `search_events` take `calendar` (`""`, `"all"`, or a name/path). | `tools/calendars.py` |
 | **Thread reconstruction.** `get_conversation` walks Outlook's conversation across folders and dates, deduped by Message-ID, oldest first. | `tools/conversation.py` |
@@ -147,13 +147,13 @@ You have three options:
 
 | Tool | Description |
 |------|-------------|
-| `list_emails` | List recent emails from any folder, with optional unread, date, sender and subfolder filters; `account="all"` for every mailbox |
+| `list_emails` | List recent emails from any folder (or `folder="all"` for the Inbox tree, Sent Items and Archive), with optional unread, date, sender and subfolder filters; `account="all"` for every mailbox |
 | `read_email` | Read full email content by entry ID or subject search (quoted history trimmed unless `include_history`); `thread_depth` says how deep in a thread it sits |
-| `search_emails` | Find mail by sender (name, address or domain), subject text and date, in about a second even in a big folder; `include_body` also scans message text (slow); `account="all"` for every mailbox |
+| `search_emails` | Find mail by a word or name in the subject, sender or recipients (`match="any"`, the default) or the subject only, by sender alone, and by date, in about a second even in a big folder; `folder="all"` covers the Inbox tree, Sent Items and Archive in one call; `include_body` also scans message text (slow); `account="all"` for every mailbox |
 | `get_conversation` | Every message of a thread, oldest first, each once, across folders and dates; `max_body_chars` for a cheap look at long threads |
 | `reply_context` | What a reply preview needs: the To/CC Outlook's own Reply or Reply All would use, who is on the thread, a digest of the earlier messages, the message in full. Creates nothing |
 | `open_in_outlook` | Open an email, draft, meeting, appointment or task in its own Outlook window when you ask. Changes nothing |
-| `contact_history` | One known person across every account: last received, last sent, recent messages both ways, last and next meeting. The broadest search; use after a targeted one |
+| `contact_history` | One known person across every account: last received, last sent, mail where they were copied, recent messages every way, last and next meeting. The broadest search; use after a targeted one. A company name given to it comes back as `subject_matches` |
 | `list_folders` | Browse the folder hierarchy with item counts |
 | `draft_email` | Write a new email to Drafts with To/CC/BCC and optional file attachments. **Not sent.** |
 | `draft_reply` | Write a reply or reply-all above the quoted thread, save to Drafts, optional attachments. **Not sent.** |
@@ -248,10 +248,16 @@ window, thread and all.
 
 ### Searching quickly
 
-Outlook filters by sender, recipient, subject and date itself, in well under a second even in
-a folder of 10,000 messages, so `search_emails` with a `sender` (name, address or domain) or a
-subject word is the fast way to find a thread, and Claude is told to start there. Three things
-are slower and are handled explicitly:
+Outlook filters by subject, sender, recipient and date itself, in well under a second even in
+a folder of 10,000 messages. `search_emails` with a word or name looks in the subject, the
+sender and the To/CC/BCC at once (`match="any"`; `match="subject"` narrows it), and
+`folder="all"` covers the Inbox tree, Sent Items and Archive in one call, so "find the thread
+about X" or "my history with company X" is one call, and Claude is told to start there. A
+company name given to `contact_history` by mistake still comes back with `subject_matches`,
+but only after a full sweep of every account and calendar. Every search result that took more
+than a couple of seconds carries `elapsed_s`, and Claude's MCP log has one line per call, so a
+slow session can be explained from the numbers. Three things are slower and are handled
+explicitly:
 
 - **Body text.** `include_body=true` opens every message in the folder, 10 to 30 seconds on a
   big one. On a PC where Windows Search has indexed Outlook's message bodies the server detects
@@ -264,7 +270,8 @@ are slower and are handled explicitly:
   error. A call made while an earlier one has overrun fails at once with "Outlook is busy".
 
 If a new search path misbehaves, `set_setting("legacy_mode", "true")` runs the pre-0.6 code
-immediately, no restart. `tests/perf_check.py` times the searches that used to be slow (read-only).
+immediately, no restart; expect it to be slow, and an all-account subject search to hit the
+time limit. `tests/perf_check.py` times the searches that used to be slow (read-only).
 
 ### Working with several calendars
 
@@ -444,6 +451,7 @@ outlook-desktop-mcp/
     test_deadline.py         # unit: deadlines and bridge request bookkeeping (no Outlook)
     test_calendars.py        # unit: calendar discovery cache with a fake store (no Outlook)
     test_conversation.py     # unit: thread depth from ConversationIndex (no Outlook)
+    test_addresses.py        # unit: sent / received / copied classification (no Outlook)
     live_check.py            # live: the fork's additions over stdio, reads only, changes nothing
     perf_check.py            # live: times the searches that used to be slow, reads only
     phase1_com_test.py       # Email COM validation (writes a draft, sends nothing)

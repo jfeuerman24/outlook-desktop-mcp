@@ -88,6 +88,22 @@ def format_recipients(item) -> list[dict]:
     return out
 
 
+def classify_direction(sender: str, sender_name: str, needle: str, own_addresses) -> str:
+    """Which way a message involving ``needle`` went, from its sender alone.
+
+    "sent" when the sender is one of the user's own addresses, "received" when the
+    sender is the person (address or name contains the needle), otherwise "copied":
+    someone else wrote to the person and the user was on the message.
+    """
+    sender_lower = (sender or "").strip().lower()
+    needle_lower = (needle or "").strip().lower()
+    if sender_lower and sender_lower in {str(a).strip().lower() for a in own_addresses}:
+        return "sent"
+    if needle_lower and (needle_lower in sender_lower or needle_lower in (sender_name or "").lower()):
+        return "received"
+    return "copied"
+
+
 def sender_matches(item, needle: str, smtp: str | None = None) -> bool:
     """Case-insensitive substring match of ``needle`` against the sender's address or name."""
     needle = needle.lower().strip()

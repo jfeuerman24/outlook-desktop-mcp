@@ -26,6 +26,7 @@ import os
 import platform
 import shutil
 import tempfile
+import time
 
 from outlook_desktop_mcp import __version__
 
@@ -33,7 +34,7 @@ from outlook_desktop_mcp.tools import calendars as calendars_mod
 from outlook_desktop_mcp.tools.calendars import describe_calendars, is_people_calendar, resolve_calendars
 from outlook_desktop_mcp.tools.conversation import conversation_items, folder_path
 from outlook_desktop_mcp.utils import dasl, deadline, settings
-from outlook_desktop_mcp.utils.addresses import format_recipients, get_smtp, sender_matches
+from outlook_desktop_mcp.utils.addresses import classify_direction, format_recipients, get_smtp, sender_matches
 from outlook_desktop_mcp.utils.dates import iso
 from outlook_desktop_mcp.utils.extract import extract
 from outlook_desktop_mcp.utils.html import (
@@ -143,16 +144,22 @@ _INSTRUCTIONS = (
     "are Outlook's own, not a guess. thread_depth on every message says how deep in a "
     "thread it sits (0 = first message); get_conversation shows the whole thread.\n\n"
     + _INSTRUCTIONS_COMMON
-    + "FINDING MAIL QUICKLY. Outlook filters by sender, recipient, subject and date in "
-    "well under a second even in a 10,000-message folder, so prefer those: search_emails "
-    "with sender= (a name, address or domain) and/or a subject word, in the default "
-    "account first. Widen to account=\"all\" only if that finds nothing, and say so. "
-    "Body-text search (include_body=true) opens every message and can take 10 to 30 "
-    "seconds per large folder: use it last, with a date range. contact_history sweeps "
-    "every account and calendar: use it for one specific person after a targeted search, "
-    "not as the first move, and give it a full name, address or domain rather than a "
-    "short first name. A result with \"partial\": true stopped at the time limit; narrow "
-    "the request instead of repeating it.\n\n"
+    + "FINDING MAIL QUICKLY. Outlook filters by subject, sender, recipient and date in "
+    "well under a second even in a 10,000-message folder. For \"find the email about X\" "
+    "or \"my history with company X\", one call does it: search_emails(query=X, "
+    "folder=\"all\") matches the subject, the sender and the recipients across the Inbox "
+    "tree, Sent Items and Archive. Start in the default account; add account=\"all\" if "
+    "that finds nothing, and say so. A company, deal or project name is a subject search, "
+    "never contact_history, which matches people (it falls back to subject_matches when "
+    "no person matches, but that costs a full sweep first). Use one spelling: if it finds "
+    "nothing, widen (folder=\"all\", account=\"all\", a longer date range) instead of "
+    "trying variants. Body-text search (include_body=true) opens every message and can "
+    "take 10 to 30 seconds per large folder: use it last, with a date range. "
+    "contact_history sweeps every account and calendar: use it for one specific person "
+    "after a targeted search, with a full name, address or domain rather than a short "
+    "first name. Once the answer is in hand, at most one confirming call. A result with "
+    "\"partial\": true stopped at the time limit; narrow the request instead of repeating "
+    "it. elapsed_s in a result says how long that call took.\n\n"
     "AVAILABLE TOOL CATEGORIES:\n"
     "- Email: list, read, search (sender/subject/body filters), get_conversation, "
     "reply_context, contact_history, draft_email, draft_reply, draft_forward, "
@@ -204,6 +211,11 @@ def _folder_subtree(folder, out: list, depth: int = 0) -> None:
 _SKIP_SUBFOLDERS = {"deleted items", "junk email", "junk e-mail", "outbox", "sync issues",
                     "conversation history", "rss feeds", "search folders"}
 _SENDER_SCAN_LIMIT = 1000  # items inspected per folder when filtering by sender
+_SENT_SCAN_CAP = 100       # contact_history: Sent Items walked in Python when the native filter finds nothing
+_SENT_SCAN_SECONDS = 3.0   # ... the most seconds that walk may take per account ...
+_SENT_SCAN_TOTAL_S = 6.0   # ... and per call across every account
+_REPORT_ELAPSED_S = 2.0    # a list result slower than this comes back as an object with elapsed_s
+_ALL_MAIL_FOLDERS = ("inbox", "sent", "archive")  # what folder="all" means
 
 
 # --- Helper: resolve store by account name ---
@@ -609,25 +621,30 @@ def _stores_for(namespace, account: str) -> tuple[list, list]:
 def _collect_across_stores(namespace, stores, folder: str, include_subfolders: bool,
                            restriction: str, count: int, sender: str):
     """``(summaries, partial)`` newest-first across ``stores``, each tagged with its
-    account when more than one store is searched. Returns a JSON error string when a
-    single named store lacks the folder; with several stores, stores without it are
-    skipped. ``partial`` is true when the time limit stopped the search early."""
+    account when more than one store is searched. ``folder="all"`` means the Inbox tree,
+    Sent Items and Archive together (subfolders included). Returns a JSON error string
+    when a single named store lacks the one folder asked for; otherwise stores without
+    it are skipped. ``partial`` is true when the time limit stopped the search early."""
     merged = []
     partial = False
+    names = _ALL_MAIL_FOLDERS if (folder or "").strip().lower() == "all" else (folder,)
     for store in stores:
         if deadline.expired():
             partial = True
             break
-        target = _resolve_folder(namespace, folder, store)
-        if not target:
-            if len(stores) == 1:
-                return json.dumps({"error": f"Folder '{folder}' not found"}), False
-            continue
         folders = []
-        if include_subfolders:
-            _folder_subtree(target, folders)
-        else:
-            folders.append(target)
+        for fname in names:
+            target = _resolve_folder(namespace, fname, store)
+            if not target:
+                if len(names) == 1 and len(stores) == 1:
+                    return json.dumps({"error": f"Folder '{folder}' not found"}), False
+                continue
+            if include_subfolders or len(names) > 1:
+                _folder_subtree(target, folders)
+            else:
+                folders.append(target)
+        if not folders:
+            continue
         found, cut = _collect_summaries(folders, restriction, count, sender)
         partial = partial or cut
         if len(stores) > 1:
@@ -701,13 +718,17 @@ def _collect_summaries(folders, restriction: str, count: int, sender: str) -> tu
     return results[:count], partial
 
 
-def _results_json(results: list, partial: bool, skipped: list) -> str:
-    """A plain JSON array when the search completed over every account it was asked
-    for; otherwise an object with the array under "results" plus "partial" and/or
-    "accounts_skipped", so the caller knows what it did not see."""
-    if not partial and not skipped:
+def _results_json(results: list, partial: bool, skipped: list, elapsed: float | None = None) -> str:
+    """A plain JSON array when the search completed quickly over every account it was
+    asked for; otherwise an object with the array under "results" plus "partial",
+    "accounts_skipped" and/or "elapsed_s", so the caller knows what it did not see and
+    what the call cost."""
+    slow = elapsed is not None and elapsed >= _REPORT_ELAPSED_S
+    if not partial and not skipped and not slow:
         return json.dumps(results, indent=2, default=str)
     out: dict = {"results": results}
+    if elapsed is not None:
+        out["elapsed_s"] = round(elapsed, 1)
     if partial:
         out["partial"] = True
         out["note"] = deadline.partial_note()
@@ -722,6 +743,27 @@ def _sent_summary(item, account_name: str) -> dict:
     r["direction"] = "sent"
     r["sent_time"] = iso(_safe_get(lambda: item.SentOn, None))
     return r
+
+
+def _own_addresses(outlook, store) -> set[str]:
+    """Lower-case SMTP addresses of the accounts that deliver to ``store`` (the user's own
+    addresses in that mailbox), plus the store's display name when it is an address."""
+    out: set[str] = set()
+    try:
+        for acc in outlook.Session.Accounts:
+            try:
+                if str(acc.DeliveryStore.StoreID) == str(store.StoreID):
+                    addr = str(_safe_get(lambda: acc.SmtpAddress) or "").strip().lower()
+                    if "@" in addr:
+                        out.add(addr)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    name = str(_safe_get(lambda: store.DisplayName) or "").strip().lower()
+    if "@" in name:
+        out.add(name)
+    return out
 
 
 @mcp.tool()
@@ -749,8 +791,9 @@ async def list_emails(
     Args:
         folder: The folder to list. Case-insensitive names: "inbox" (default),
             "sent"/"sentmail", "drafts", "deleted"/"trash", "junk"/"spam",
-            "outbox", "archive", a custom folder name, or a slash path such as
-            "Inbox/Clients" (see list_folders).
+            "outbox", "archive", a custom folder name, a slash path such as
+            "Inbox/Clients" (see list_folders), or "all" for the Inbox tree,
+            Sent Items and Archive together.
         count: Maximum number of emails to return. Default 10, max 200.
         unread_only: If true, only return unread emails. Default false.
         start_date: Optional. Only return emails received on or after this date.
@@ -774,6 +817,7 @@ async def list_emails(
     """
     def _list(outlook, namespace, folder, count, unread_only, start_date, end_date,
               sender, include_subfolders, account):
+        t0 = time.perf_counter()
         count = min(max(1, count), 200)
         stores, skipped = _stores_for(namespace, account)
 
@@ -795,7 +839,7 @@ async def list_emails(
                                                   " AND ".join(restrictions), count, sender)
         if isinstance(results, str):
             return results
-        return _results_json(results, partial, skipped)
+        return _results_json(results, partial, skipped, time.perf_counter() - t0)
 
     try:
         return await bridge.call(_list, folder, count, unread_only, start_date, end_date,
@@ -920,6 +964,7 @@ async def get_conversation(
         where source is "conversation", "topic_search" or "none".
     """
     def _get(outlook, namespace, entry_id, count, include_bodies, max_body_chars, account):
+        t0 = time.perf_counter()
         count = min(max(1, count), 200)
         max_body_chars = max(0, int(max_body_chars or 0))
         store = _require_store(namespace, account)
@@ -947,6 +992,7 @@ async def get_conversation(
             "source": source,
             "message_count": len(out),
             "messages": out,
+            "elapsed_s": round(time.perf_counter() - t0, 1),
         }, indent=2, default=str)
 
     try:
@@ -1633,28 +1679,38 @@ async def search_emails(
     sender: str = "",
     include_subfolders: bool = False,
     include_body: bool = False,
+    match: str = "any",
     account: str = "",
 ) -> str:
-    """Find emails in the user's main mailbox (Outlook) by sender, subject text
-    and/or date. Fast: Outlook does the filtering, well under a second even in a
-    10,000-message folder.
+    """Find emails in the user's main mailbox (Outlook) by a word or name in the
+    subject, sender or recipients, by sender alone, and/or by date. Fast:
+    Outlook does the filtering, well under a second even in a 10,000-message
+    folder.
 
-    Start here for "find the email from X" or "the thread about Y". A sender
-    filter alone lists everything from a person or domain; a subject word finds a
-    thread. Results are newest first and each carries an entry_id for read_email,
-    get_conversation or the draft tools.
+    Start here for "find the email from X", "the thread about Y" or "my history
+    with company Z". One call covers it: query= with folder="all" matches the
+    subject, the sender and the To/CC/BCC of every message in the Inbox tree,
+    Sent Items and Archive. A sender= filter alone lists everything from a person
+    or domain. Results are newest first and each carries an entry_id for
+    read_email, get_conversation, reply_context or the draft tools. Use one
+    spelling and widen (folder="all", account="all", a date range) rather than
+    trying variants.
 
     include_body=true also scans message text. That opens every message in the
-    folder and takes 10 to 30 seconds per large folder; use it only when sender
-    and subject searches have failed, and add a date range. (Where Windows Search
-    has indexed Outlook's bodies the server detects it and body search is fast.)
+    folder and takes 10 to 30 seconds per large folder; use it only when the
+    normal search has failed, and add a date range. (Where Windows Search has
+    indexed Outlook's bodies the server detects it and body search is fast.)
 
     Args:
-        query: Text to find in the subject (case-insensitive substring), e.g.
-            "Sanders", "EHC offer". With include_body also in the message text.
-            May be empty when 'sender' is given.
+        query: Text to find (case-insensitive substring), e.g. "Sanders",
+            "EHC offer", "Earl Gray". With match="any" (default) it is looked
+            for in the subject, the sender's name and address, and the To/CC/BCC
+            names and addresses; with match="subject" in the subject only. With
+            include_body also in the message text. May be empty when 'sender'
+            is given.
         folder: Folder to search in. Default "inbox". Supports the same names
-            and slash paths as list_emails.
+            and slash paths as list_emails, or "all" for the Inbox tree, Sent
+            Items and Archive together (subfolders included).
         count: Maximum results to return. Default 10, max 200.
         start_date: Optional. Only emails received on or after this date.
             ISO 8601 (e.g. "2026-03-10" or "2026-03-10 09:00").
@@ -1665,32 +1721,42 @@ async def search_emails(
             Matches the real SMTP address even for senders inside the user's own
             organisation.
         include_subfolders: If true, also search every subfolder of 'folder'.
-            Default false.
+            Default false (implied by folder="all").
         include_body: If true, also match 'query' against message text. Slow on
             big folders (see above). Default false.
+        match: "any" (default) or "subject". See 'query'. A short common word
+            with "any" matches more, so for a word that is only ever a subject
+            ("invoice") "subject" is tighter.
         account: Optional. Account display name (or substring), or "all" for
             every account (shared mailboxes not cached locally are skipped and
             listed under accounts_skipped). Default: the default account.
 
     Returns:
         JSON array of matching email summaries. If the time limit cut the search
-        short or accounts were skipped, an object {"results": [...],
-        "partial": true, "note": ..., "accounts_skipped": [...]} instead.
+        short, accounts were skipped, or the call took more than a couple of
+        seconds, an object {"results": [...], "partial": true, "note": ...,
+        "accounts_skipped": [...], "elapsed_s": ...} instead.
     """
     def _search(outlook, namespace, query, folder, count, start_date, end_date,
-                sender, include_subfolders, include_body, account):
+                sender, include_subfolders, include_body, match, account):
+        t0 = time.perf_counter()
         count = min(max(1, count), 200)
         if not query and not sender:
             return json.dumps({"error": "Provide a query, a sender, or both"})
+        mode = (match or "any").strip().lower()
+        if mode not in ("any", "subject"):
+            return json.dumps({"error": f"match must be \"any\" or \"subject\", got {match!r}"})
         stores, skipped = _stores_for(namespace, account)
 
         dasl_parts = []
         if query:
-            if include_body or _legacy():
-                indexed = (not _legacy()) and _body_index_ok(namespace)
-                dasl_parts.append(dasl.subject_or_body_filter(query, indexed_body=indexed))
+            with_body = include_body or _legacy()
+            indexed = bool(with_body and (not _legacy()) and _body_index_ok(namespace))
+            if _legacy() or mode == "subject":
+                dasl_parts.append(dasl.subject_or_body_filter(query, indexed_body=indexed) if with_body
+                                  else dasl.subject_filter(query))
             else:
-                dasl_parts.append(dasl.subject_filter(query))
+                dasl_parts.append(dasl.anywhere_filter(query, indexed_body=indexed if with_body else None))
         if start_date:
             dasl_parts.append(dasl.received_since(_parse_date(start_date)))
         if end_date:
@@ -1703,11 +1769,11 @@ async def search_emails(
                                                   filter_str, count, sender)
         if isinstance(results, str):
             return results
-        return _results_json(results, partial, skipped)
+        return _results_json(results, partial, skipped, time.perf_counter() - t0)
 
     try:
         return await bridge.call(_search, query, folder, count, start_date, end_date,
-                                 sender, include_subfolders, include_body, account)
+                                 sender, include_subfolders, include_body, match, account)
     except Exception as e:
         return f"Error searching emails: {format_com_error(e)}"
 
@@ -2261,15 +2327,19 @@ async def search_events(
             Default: primary account. Use list_accounts to see available accounts.
 
     Returns:
-        JSON array of matching event summaries.
+        JSON array of matching event summaries; when the call took more than a
+        couple of seconds (a long date range over many calendars expands every
+        recurrence), an object {"results": [...], "elapsed_s": ...} instead.
     """
     def _search(outlook, namespace, query, start_date, end_date, count, calendar, account):
+        t0 = time.perf_counter()
         count = min(max(1, count), 200)
         store = _require_store(namespace, account)
         calendars = resolve_calendars(store, calendar)
         start = _parse_date(start_date) if start_date else datetime.now() - timedelta(days=30)
         end = _parse_date(end_date) if end_date else datetime.now() + timedelta(days=30)
-        return json.dumps(_events_in(calendars, start, end, count, query), indent=2, default=str)
+        events = _events_in(calendars, start, end, count, query)
+        return _results_json(events, False, [], time.perf_counter() - t0)
 
     try:
         return await bridge.call(_search, query, start_date, end_date, count, calendar, account)
@@ -2995,14 +3065,18 @@ async def contact_history(
     include_meetings: bool = True,
 ) -> str:
     """Everything recent with one person in the user's Outlook mail and calendars,
-    in one call: when they last wrote, when the user last wrote to them, the
-    recent messages in both directions, and the last and next meetings with them.
+    in one call: when they last wrote, when the user last wrote to them, mail
+    where someone else wrote to them and the user was copied, the recent
+    messages in every direction, and the last and next meetings with them.
     Looks across every account (unless one is named), the whole Inbox tree, Sent
     Items and every calendar.
 
     This is the broadest search the server offers. Use it for one specific
     person once you know who they are, not as the first move for "find the
-    email about X" (use search_emails with sender= or a subject word for that).
+    email about X" and never for a company, deal or project name: those are
+    subject searches (search_emails with query= and folder="all"). If nothing
+    matches a person, the result carries subject_matches instead, so a company
+    name still finds its thread, but only after the full sweep came back empty.
     Give it something specific: a surname, a full name, an address or a domain.
     A short first name like "dan" matches every Dan, Dante and Jordan.
 
@@ -3019,13 +3093,18 @@ async def contact_history(
             Default true.
 
     Returns:
-        JSON with last_received, last_sent, received_count, sent_count, recent
-        (merged timeline, newest first, each tagged direction and account),
-        meetings {last, next, past_count, upcoming_count}, accounts_searched and
-        accounts_skipped. "partial": true means the time limit stopped the sweep;
-        narrow it (one account, fewer days) rather than repeating it.
+        JSON with last_received, last_sent, received_count, sent_count,
+        copied_count, recent (merged timeline, newest first, each tagged with a
+        direction of received, sent or copied, and its account), meetings {last,
+        next, past_count, upcoming_count}, accounts_searched, accounts_skipped
+        and elapsed_s. subject_matches (with a note) appears only when no mail
+        from or to the person was found. sent_scan_capped means the slow
+        fallback scan of Sent Items stopped at its cap. "partial": true means
+        the time limit stopped the sweep; narrow it (one account, fewer days)
+        rather than repeating it.
     """
     def _history(outlook, namespace, person, days, count, account, include_meetings):
+        t0 = time.perf_counter()
         needle = (person or "").strip()
         if not needle:
             return json.dumps({"error": "person is required"})
@@ -3042,34 +3121,47 @@ async def contact_history(
         stamp = dasl.jet_date(since)
         received: list = []
         sent: list = []
+        copied: list = []
         searched = []
         partial = False
+        sent_scan_capped = False
+        scan_spent = 0.0
+        inbox_trees: dict[str, list] = {}
         for store in stores:
             if deadline.expired():
                 partial = True
                 break
             name = str(store.DisplayName)
             searched.append(name)
-            # Received: Inbox tree, matched by Outlook on sender name, directory address
-            # and SMTP address.
+            own = _own_addresses(outlook, store)
+            # Inbox tree, matched by Outlook. The sender's name, directory address and
+            # SMTP address are matched, and (unless legacy) the To/CC/BCC display strings
+            # too, so mail where the person is a co-recipient (a colleague wrote to them
+            # and copied the user) and the user's own replies filed outside Sent Items
+            # are found as well. The sender then says which way each message went.
             folders: list = []
             try:
                 _folder_subtree(store.GetDefaultFolder(OL_FOLDER_INBOX), folders)
             except Exception:
                 folders = []
-            received_filter = dasl.sql(dasl.sender_filter(needle), dasl.received_since(since))
-            found, cut = _collect_summaries(folders, received_filter, count, "")
+            inbox_trees[name] = folders
+            people = dasl.sender_filter(needle) if legacy else dasl.people_filter(needle)
+            found, cut = _collect_summaries(folders, dasl.sql(people, dasl.received_since(since)),
+                                            count if legacy else count * 2, "")
             partial = partial or cut
             for r in found:
                 r["account"] = name
-                r["direction"] = "received"
-                received.append(r)
+                r["direction"] = "received" if legacy else classify_direction(
+                    r.get("sender", ""), r.get("sender_name", ""), needle, own)
+                {"received": received, "sent": sent}.get(r["direction"], copied).append(r)
 
-            # Sent: Outlook matches the To/CC/BCC display strings. Those hold names, so
-            # the names this person has written under are searched alongside the needle
-            # (an address needle alone would miss "Lou Castelli"). Python walks Sent
-            # Items only when Outlook rejects the filter, in legacy mode, or when an
-            # address-like needle found nothing natively.
+            # Sent Items: Outlook matches the To/CC/BCC display strings. Those hold names,
+            # so the names this person has written under are searched alongside the
+            # needle (an address needle alone would miss "Lou Castelli"). Python walks
+            # Sent Items only when Outlook rejects the filter, in legacy mode, or when an
+            # address-like needle found nothing natively. That walk resolves every
+            # recipient's address, so it is capped by count and by seconds: uncapped it
+            # once took 30 s across three accounts to confirm there was nothing.
             known_names: list[str] = []
             for r in received:
                 n = str(r.get("sender_name") or "").strip()
@@ -3100,15 +3192,29 @@ async def contact_history(
                 except Exception as e:
                     logger.warning("Native recipient filter rejected (%s); scanning Sent Items in Python", e)
                     native_ok = False
+            # The walk is pointless when the Inbox tree already showed this address raw in
+            # a To/CC string (Outlook would then have matched Sent Items natively too), and
+            # it is budgeted per account and per call. Legacy mode keeps the old, uncapped walk.
             scan_python = items is not None and (
-                legacy or not native_ok or (not sent_here and dasl.looks_like_address(needle)))
+                legacy or not native_ok
+                or (not sent_here and dasl.looks_like_address(needle) and not found))
+            if scan_python and not legacy and scan_spent >= _SENT_SCAN_TOTAL_S:
+                scan_python = False
+                sent_scan_capped = True
             if scan_python and not deadline.expired():
-                limit = _SENDER_SCAN_LIMIT if legacy else _SENDER_SCAN_LIMIT // 2
+                limit = _SENDER_SCAN_LIMIT if legacy else _SENT_SCAN_CAP
+                scan_started = time.monotonic()
+                stop_at = float("inf") if legacy else scan_started + min(_SENT_SCAN_SECONDS, _SENT_SCAN_TOTAL_S - scan_spent)
                 matched = 0
+                scanned = 0
                 for item in _iter_items(items, limit):
                     if deadline.expired():
                         partial = True
                         break
+                    if time.monotonic() >= stop_at:
+                        sent_scan_capped = True
+                        break
+                    scanned += 1
                     try:
                         if int(item.Class) != _OL_CLASS_MAIL:
                             continue
@@ -3127,10 +3233,40 @@ async def contact_history(
                             break
                     except Exception:
                         continue
-            sent.extend(sent_here)
+                if scanned >= limit and matched < count:
+                    sent_scan_capped = True
+                scan_spent += time.monotonic() - scan_started
+            seen_ids = {str(r.get("entry_id")) for r in sent}
+            sent.extend(r for r in sent_here if str(r.get("entry_id")) not in seen_ids)
         received.sort(key=lambda r: r.get("received_time") or "", reverse=True)
         sent.sort(key=lambda r: r.get("sent_time") or r.get("received_time") or "", reverse=True)
-        timeline = sorted(received + sent, key=lambda r: r.get("sent_time") or r.get("received_time") or "", reverse=True)[:count]
+        copied.sort(key=lambda r: r.get("received_time") or "", reverse=True)
+        timeline = sorted(received + sent + copied,
+                          key=lambda r: r.get("sent_time") or r.get("received_time") or "", reverse=True)[:count]
+
+        # Nothing from or to this name as a person? It may be a company, deal or topic
+        # (the wrong tool for it, but a common choice). One cheap subject pass over the
+        # same folders plus Sent Items, so the caller still gets the thread.
+        subject_matches: list = []
+        if not legacy and not received and not sent and not copied and not deadline.expired():
+            for store in stores:
+                if deadline.expired():
+                    partial = True
+                    break
+                name = str(store.DisplayName)
+                folders = list(inbox_trees.get(name, []))
+                try:
+                    folders.append(store.GetDefaultFolder(OL_FOLDER_SENT_MAIL))
+                except Exception:
+                    pass
+                found, cut = _collect_summaries(
+                    folders, dasl.sql(dasl.subject_filter(needle), dasl.received_since(since)), count, "")
+                partial = partial or cut
+                for r in found:
+                    r["account"] = name
+                subject_matches.extend(found)
+            subject_matches.sort(key=lambda r: r.get("received_time") or "", reverse=True)
+            subject_matches = subject_matches[:count]
 
         meetings = None
         if include_meetings and not deadline.expired():
@@ -3171,10 +3307,25 @@ async def contact_history(
             "last_sent": sent[0] if sent else None,
             "received_count": len(received),
             "sent_count": len(sent),
-            "counts_note": f"Counts are capped at {count} per direction per account; raise count for more.",
+            "copied_count": len(copied),
+            "counts_note": (f"Counts are capped at about {count} per direction per account; raise count for more. "
+                            "copied = someone else wrote to this person and the user was on the message."),
             "recent": timeline,
             "meetings": meetings,
+            "elapsed_s": round(time.perf_counter() - t0, 1),
         }
+        if subject_matches:
+            out["subject_matches"] = subject_matches
+            out["subject_matches_note"] = (
+                f"No mail from or to {needle!r} as a person. These messages carry it in the subject, so it "
+                "is probably a company, deal or topic: use search_emails (query=, folder=\"all\") for those, "
+                "and get_conversation on a hit for the thread.")
+        if sent_scan_capped:
+            out["sent_scan_capped"] = True
+            out["sent_scan_note"] = (
+                "The slow fallback scan of Sent Items stopped at its cap, so mail sent to this address under a "
+                "display name the server has not seen may be missing. Name the person as Outlook shows them "
+                "to search Sent Items natively.")
         if skipped:
             out["accounts_skipped"] = skipped
         if partial:

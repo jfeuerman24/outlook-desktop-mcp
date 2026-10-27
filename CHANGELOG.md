@@ -3,6 +3,46 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## 0.8.0 - 2026-10-27
+
+Prompted by a Claude Desktop session that took two minutes to find one thread with a company:
+nine calls in four rounds, four of them `contact_history` sweeps that found nothing. Replaying
+those nine calls read-only: 60.5 s of server time before, 43.8 s after, and the first call now
+returns the thread on its own. The one-call form the instructions now steer to,
+`search_emails(query="Earl Gray", folder="all", account="all")`, takes 1.2 s.
+
+### Fixed
+- **`contact_history` missed mail where the person was only a recipient.** The Inbox tree was
+  matched on the sender alone, so a colleague writing to the person with the user copied, and
+  the user's own replies filed outside Sent Items, were invisible; a search for the company's
+  domain returned nothing although the thread was addressed to it. The To/CC/BCC display
+  strings are now matched too, and each hit is tagged `received`, `sent` or `copied` from its
+  sender and the account's own addresses (`copied_count` is new).
+- **`contact_history` spent 30 s confirming "nothing" in Sent Items.** The Python fallback that
+  resolves every recipient when an address-like needle finds nothing natively is now skipped
+  when the Inbox tree already showed the address raw, and otherwise capped at 100 messages and
+  3 s per account, 6 s per call, reported as `sent_scan_capped`. Legacy mode keeps the old walk.
+
+### Added
+- **`search_emails` `match="any"`** (default): the query is looked for in the subject, the
+  sender and the recipients in one native filter; `match="subject"` is the old behaviour.
+  **`folder="all"`** on `search_emails` and `list_emails` covers the Inbox tree, Sent Items and
+  Archive in one call. "My history with company X" is now one call instead of two or more.
+- **`contact_history` falls back to subject matches.** When nothing matches a person, the
+  result carries `subject_matches` from one cheap subject pass, so a company, deal or project
+  name given to the wrong tool still finds its thread.
+- **Timing.** `contact_history` and `get_conversation` always report `elapsed_s`; a
+  `search_emails`, `list_emails` or `search_events` result that took more than two seconds
+  comes back as an object with `elapsed_s`; and the server logs one line per call with the
+  tool's name and duration, so a slow session can be explained from Claude's MCP log instead
+  of guessed at.
+- `tests/perf_check.py` replays the company-name case (`--company`, `--domain`).
+
+### Changed
+- Server instructions: a company, deal or project name is a subject search, never
+  `contact_history`; start in the default account; use one spelling and widen rather than
+  trying variants; at most one confirming call once the answer is in hand.
+
 ## 0.7.0 - 2026-10-27
 
 ### Added

@@ -56,7 +56,11 @@ class _Request:
         self.kwargs = kwargs
         self.event = threading.Event()
         self.holder: dict = {}
-        self.name = getattr(func, "__name__", "call")
+        # Tool functions are closures named _search, _history and so on; the qualified name
+        # carries the tool's name in front ("search_emails.<locals>._search"), which is
+        # what the log should say.
+        qualified = getattr(func, "__qualname__", "") or getattr(func, "__name__", "call")
+        self.name = qualified.split(".<locals>.")[0] if ".<locals>." in qualified else qualified
         self.enqueued = time.monotonic()
         self.deadline_at = self.enqueued + timeout
         self.soft_at = self.deadline_at - min(SOFT_MARGIN, timeout * 0.25)
@@ -131,6 +135,10 @@ class OutlookBridge:
                     took = time.monotonic() - now
                     if took > req.soft_at - now:
                         logger.warning("%s ran %.1fs (limit %.0fs)", req.name, took, req.deadline_at - req.enqueued)
+                    else:
+                        # One line per call in Claude's MCP log, so a slow session can be
+                        # explained from the log instead of guessed at.
+                        logger.info("%s took %.1fs", req.name, took)
                     req.event.set()
         except Exception as e:
             self._init_error = e
