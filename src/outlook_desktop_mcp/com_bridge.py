@@ -85,17 +85,18 @@ class OutlookBridge:
 
         The function signature must be: func(outlook, namespace, *args, **kwargs)
         """
+        timeout = kwargs.pop("_timeout", 60)  # seconds; the COM thread keeps running the call regardless
         result_event = threading.Event()
         result_holder = {}
         self._request_queue.put((func, args, kwargs, result_event, result_holder))
 
         loop = asyncio.get_running_loop()
         signaled = await loop.run_in_executor(
-            None, lambda: result_event.wait(timeout=60)
+            None, lambda: result_event.wait(timeout=timeout)
         )
         if not signaled:
             raise TimeoutError(
-                "Outlook COM operation timed out after 60 seconds. "
+                f"Outlook COM operation timed out after {timeout} seconds. "
                 "Outlook may be waiting for user input (e.g., a dialog box)."
             )
 

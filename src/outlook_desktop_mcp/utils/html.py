@@ -3,7 +3,7 @@
 Outlook's reply template and plain ``Body`` assignments fall back to the recipient's or
 Word's defaults (often Calibri 11). ``draft_email`` and ``draft_reply`` wrap what they write
 in an explicit font so it renders the same everywhere. Defaults: Aptos, 12 pt, black.
-Override with environment variables:
+Override with the settings file (``set_setting``) or environment variables:
 
     OUTLOOK_MCP_FONT_FAMILY   (default "Aptos")
     OUTLOOK_MCP_FONT_SIZE_PT  (default "12")
@@ -19,8 +19,9 @@ ignores inherited font on a bare container; this mirrors what Outlook itself wri
 see its docstring.
 """
 import html
-import os
 import re
+
+from outlook_desktop_mcp.utils import settings
 
 DEFAULT_FAMILY = "Aptos"
 DEFAULT_SIZE_PT = "12"
@@ -30,18 +31,18 @@ _BODY_OPEN = re.compile(r"<body\b[^>]*>", re.I)
 
 
 def plain_text_mode() -> bool:
-    return os.environ.get("OUTLOOK_MCP_PLAIN_TEXT", "").strip().lower() in {"1", "true", "yes", "on"}
+    return bool(settings.get("plain_text"))
 
 
 def open_drafts_default() -> bool:
     """Whether draft_* tools open the saved item in an Outlook window when not told."""
-    return os.environ.get("OUTLOOK_MCP_OPEN_DRAFTS", "").strip().lower() in {"1", "true", "yes", "on"}
+    return bool(settings.get("open_drafts"))
 
 
 def font_style() -> str:
-    family = os.environ.get("OUTLOOK_MCP_FONT_FAMILY", DEFAULT_FAMILY).strip() or DEFAULT_FAMILY
-    size = os.environ.get("OUTLOOK_MCP_FONT_SIZE_PT", DEFAULT_SIZE_PT).strip() or DEFAULT_SIZE_PT
-    color = os.environ.get("OUTLOOK_MCP_FONT_COLOR", DEFAULT_COLOR).strip() or DEFAULT_COLOR
+    family = str(settings.get("font_family") or DEFAULT_FAMILY).strip() or DEFAULT_FAMILY
+    size = str(settings.get("font_size_pt") or DEFAULT_SIZE_PT).strip() or DEFAULT_SIZE_PT
+    color = str(settings.get("font_color") or DEFAULT_COLOR).strip() or DEFAULT_COLOR
     return f"font-family:{family},Calibri,sans-serif;font-size:{size}pt;color:{color}"
 
 
@@ -122,3 +123,40 @@ def inject_into_body(document: str, fragment: str) -> str:
         return fragment + (document or "")
     end = match.end()
     return document[:end] + "\n" + fragment + "\n" + document[end:]
+
+
+# ---------------------------------------------------------------------------
+# The note the server writes into a draft is wrapped in a marked <div> so that
+# update_draft can find and replace it later without touching the signature or
+# the quoted history underneath.
+# ---------------------------------------------------------------------------
+NOTE_ID = "outlook-mcp-note"
+_NOTE_START = re.compile(r"<div\b[^>]*\bid\s*=\s*[\"']?" + NOTE_ID + r"[\"']?[^>]*>", re.I)
+_DIV_TOKEN = re.compile(r"<(/?)div\b[^>]*>", re.I)
+
+
+def wrap_note(fragment: str) -> str:
+    return f'<div id="{NOTE_ID}">{fragment}</div>'
+
+
+def find_note(document: str) -> tuple[int, int] | None:
+    """``(start, end)`` of the marked note div in ``document`` (end is past the closing tag),
+    found by balancing nested <div> tags; None when there is no marker."""
+    m = _NOTE_START.search(document or "")
+    if not m:
+        return None
+    depth = 1
+    for tok in _DIV_TOKEN.finditer(document, m.end()):
+        depth += -1 if tok.group(1) else 1
+        if depth == 0:
+            return m.start(), tok.end()
+    return None
+
+
+def replace_note(document: str, fragment: str) -> str | None:
+    """``document`` with the marked note replaced by ``wrap_note(fragment)``; None if no marker."""
+    span = find_note(document)
+    if span is None:
+        return None
+    start, end = span
+    return document[:start] + wrap_note(fragment) + document[end:]

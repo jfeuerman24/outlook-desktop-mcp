@@ -7,6 +7,14 @@ from outlook_desktop_mcp.utils import html as h
 
 
 class StyleTests(unittest.TestCase):
+    def setUp(self):
+        # Never read the machine's real settings file during tests.
+        self._env = mock.patch.dict(os.environ, {"OUTLOOK_MCP_SETTINGS_FILE": os.devnull}, clear=False)
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+
     def test_defaults_are_aptos_12_black(self):
         with mock.patch.dict(os.environ, {}, clear=False):
             for key in ("OUTLOOK_MCP_FONT_FAMILY", "OUTLOOK_MCP_FONT_SIZE_PT", "OUTLOOK_MCP_FONT_COLOR"):
@@ -57,4 +65,28 @@ if __name__ == "__main__":
         self.assertIn("paste me<br>and me", out)
         self.assertIn("Done &amp; dusted.", out)
         self.assertNotIn("**", out)
+
+    def test_note_marker_round_trip(self):
+        doc = ('<html><body>' + h.wrap_note('<p>old note</p><div><p>nested</p></div>')
+               + '<div class="sig">-- Jake</div><div>quoted history</div></body></html>')
+        span = h.find_note(doc)
+        self.assertIsNotNone(span)
+        start, end = span
+        self.assertTrue(doc[start:end].startswith('<div id="outlook-mcp-note">'))
+        self.assertTrue(doc[start:end].endswith('</div>'))
+        self.assertIn('nested', doc[start:end])
+        self.assertNotIn('-- Jake', doc[start:end])
+        new = h.replace_note(doc, '<p>new note</p>')
+        self.assertIn('<p>new note</p>', new)
+        self.assertNotIn('old note', new)
+        self.assertIn('-- Jake', new)
+        self.assertIn('quoted history', new)
+
+    def test_note_marker_survives_word_style_rewrite(self):
+        # Outlook's editor may drop the quotes and add attributes to the div.
+        doc = '<body><div id=outlook-mcp-note class=WordSection1><p>x</p></div><p>sig</p></body>'
+        self.assertEqual(h.replace_note(doc, '<p>y</p>'), '<body><div id="outlook-mcp-note"><p>y</p></div><p>sig</p></body>')
+
+    def test_replace_note_without_marker_returns_none(self):
+        self.assertIsNone(h.replace_note('<body><p>hand written</p></body>', '<p>y</p>'))
 

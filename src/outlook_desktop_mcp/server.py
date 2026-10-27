@@ -23,17 +23,25 @@ from outlook_desktop_mcp.com_bridge import OutlookBridge
 from datetime import datetime, timedelta
 
 import os
+import platform
 import shutil
 import tempfile
 
+from outlook_desktop_mcp import __version__
+
 from outlook_desktop_mcp.tools.calendars import describe_calendars, resolve_calendars
 from outlook_desktop_mcp.tools.conversation import conversation_items
-from outlook_desktop_mcp.utils.addresses import get_smtp, sender_matches
+from outlook_desktop_mcp.utils import settings
+from outlook_desktop_mcp.utils.addresses import format_recipients, get_smtp, sender_matches
+from outlook_desktop_mcp.utils.dates import iso
+from outlook_desktop_mcp.utils.extract import extract
 from outlook_desktop_mcp.utils.html import (
-    inject_into_body, open_drafts_default, plain_text_mode, style_html, text_to_html,
+    inject_into_body, open_drafts_default, plain_text_mode, replace_note, style_html, text_to_html, wrap_note,
 )
 from outlook_desktop_mcp.tools._folder_constants import (
     FOLDER_NAME_TO_ENUM,
+    OL_FOLDER_INBOX,
+    OL_FOLDER_SENT_MAIL,
     OL_MAIL_ITEM,
     OL_APPOINTMENT_ITEM,
     OL_FOLDER_CALENDAR,
@@ -172,22 +180,53 @@ _SENDER_SCAN_LIMIT = 1000  # items inspected per folder when filtering by sender
 
 # --- Helper: resolve store by account name ---
 
+def _match_store(namespace, needle: str):
+    """Store whose DisplayName equals ``needle`` (case-insensitive), else the first containing it."""
+    needle = (needle or "").lower().strip()
+    if not needle:
+        return None
+    partial = None
+    for i in range(namespace.Stores.Count):
+        store = namespace.Stores.Item(i + 1)
+        name = str(store.DisplayName or "").lower()
+        if name == needle:
+            return store
+        if needle in name and partial is None:
+            partial = store
+    return partial
+
+
 def _resolve_store(namespace, account: str = ""):
     """Resolve an account name to an Outlook Store object.
 
-    If account is empty, returns DefaultStore.
-    Otherwise does a case-insensitive substring match on Store.DisplayName.
+    Empty ``account`` means the server's default_account setting if one is set and
+    matches, otherwise Outlook's own DefaultStore. Otherwise a case-insensitive match
+    on Store.DisplayName (exact name wins over substring).
     """
     if not account:
+        preferred = settings.get("default_account")
+        if preferred:
+            found = _match_store(namespace, preferred)
+            if found is not None:
+                return found
         return namespace.DefaultStore
+    return _match_store(namespace, account)
 
-    account_lower = account.lower().strip()
+
+def _is_hidden_store(store) -> bool:
+    """True when the hide_accounts setting names this store."""
+    name = str(store.DisplayName or "").lower()
+    return any(part.lower() in name for part in settings.get("hide_accounts") if part)
+
+
+def _visible_stores(namespace) -> list:
+    """Every store except the hidden ones (what account="all" means)."""
+    out = []
     for i in range(namespace.Stores.Count):
         store = namespace.Stores.Item(i + 1)
-        if account_lower in store.DisplayName.lower():
-            return store
-
-    return None
+        if not _is_hidden_store(store):
+            out.append(store)
+    return out
 
 
 def _require_store(namespace, account: str = ""):
@@ -274,30 +313,45 @@ def _resolve_folder(namespace, folder_name: str, store=None):
 # =====================================================================
 
 @mcp.tool()
-async def list_accounts() -> str:
-    """List all Outlook accounts (stores) configured in the profile.
+async def list_accounts(include_hidden: bool = False) -> str:
+    """List the Outlook accounts (stores) in the profile.
 
     Returns a JSON array of account objects with display_name, store_id,
-    and is_default. Use the display_name (or a unique substring) as the
-    'account' parameter in other tools to target a specific account.
+    is_default (the account tools use when none is named; see the
+    default_account setting) and is_outlook_default. Accounts named in the
+    hide_accounts setting are left out unless include_hidden is true. Use the
+    display_name (or a unique substring) as the 'account' parameter in other
+    tools, or "all" where a tool accepts it.
+
+    Args:
+        include_hidden: Also list accounts hidden by the hide_accounts setting.
 
     Returns:
         JSON array of account objects.
     """
-    def _list(outlook, namespace):
-        default_id = namespace.DefaultStore.StoreID
+    def _list(outlook, namespace, include_hidden):
+        outlook_default_id = str(namespace.DefaultStore.StoreID)
+        tools_default = _resolve_store(namespace, "")
+        tools_default_id = str(tools_default.StoreID) if tools_default is not None else outlook_default_id
         results = []
         for i in range(namespace.Stores.Count):
             store = namespace.Stores.Item(i + 1)
-            results.append({
+            hidden = _is_hidden_store(store)
+            if hidden and not include_hidden:
+                continue
+            entry = {
                 "display_name": store.DisplayName,
                 "store_id": store.StoreID,
-                "is_default": store.StoreID == default_id,
-            })
+                "is_default": str(store.StoreID) == tools_default_id,
+                "is_outlook_default": str(store.StoreID) == outlook_default_id,
+            }
+            if include_hidden:
+                entry["hidden"] = hidden
+            results.append(entry)
         return json.dumps(results, indent=2, default=str)
 
     try:
-        return await bridge.call(_list)
+        return await bridge.call(_list, include_hidden)
     except Exception as e:
         return f"Error listing accounts: {format_com_error(e)}"
 
@@ -345,8 +399,23 @@ def _write_draft_text(item, body: str, html_body: str = "") -> None:
         existing = str(_safe_get(lambda: item.Body) or "")
         item.Body = body + ("\n\n" + existing if existing.strip() else "")
         return
-    fragment = style_html(html_body) if html_body else text_to_html(body)
+    fragment = wrap_note(style_html(html_body) if html_body else text_to_html(body))
     item.HTMLBody = inject_into_body(str(_safe_get(lambda: item.HTMLBody) or ""), fragment)
+
+
+def _attach_files(item, paths: str) -> list[dict]:
+    """Attach each file in the semicolon-separated ``paths`` to ``item``; returns what was attached."""
+    added = []
+    for raw in (paths or "").split(";"):
+        p = raw.strip().strip('"').strip("'")
+        if not p:
+            continue
+        full = os.path.abspath(os.path.expanduser(os.path.expandvars(p)))
+        if not os.path.isfile(full):
+            raise ValueError(f"Attachment not found: {full}")
+        item.Attachments.Add(full)
+        added.append({"filename": os.path.basename(full), "size": os.path.getsize(full), "path": full})
+    return added
 
 
 def _save_draft(item, kind: str, open_in_outlook: bool | None, **extra) -> str:
@@ -398,6 +467,7 @@ async def draft_email(
     bcc: str = "",
     html_body: str = "",
     account: str = "",
+    attachments: str = "",
     open_in_outlook: bool | None = None,
 ) -> str:
     """Write a new email to the Drafts folder. It is NOT sent.
@@ -432,6 +502,8 @@ async def draft_email(
         account: Optional. Account display name (or substring) the draft belongs
             to and will be sent from. Default: primary account. Use list_accounts
             to see available accounts.
+        attachments: Optional. Full path(s) of file(s) on this PC to attach,
+            separated by semicolons.
         open_in_outlook: Optional. True also opens the draft in an Outlook
             window; false only saves it to Drafts. Leave unset to follow the
             OUTLOOK_MCP_OPEN_DRAFTS setting (default: only save).
@@ -440,7 +512,7 @@ async def draft_email(
         JSON with status "draft_saved", sent=false, entry_id, folder and whether
         it was opened in Outlook. Tell the user the draft is waiting for them.
     """
-    def _draft(outlook, namespace, to, subject, body, cc, bcc, html_body, account, open_in_outlook):
+    def _draft(outlook, namespace, to, subject, body, cc, bcc, html_body, account, attachments, open_in_outlook):
         store = _require_store(namespace, account)
         mail = store.GetDefaultFolder(OL_FOLDER_DRAFTS).Items.Add(OL_MAIL_ITEM)
         _set_sending_account(mail, outlook, store)
@@ -450,11 +522,12 @@ async def draft_email(
         if bcc:
             mail.BCC = bcc
         mail.Subject = subject
+        files = _attach_files(mail, attachments)
         _write_draft_text(mail, body, html_body)
-        return _save_draft(mail, "email", open_in_outlook, to=to, cc=cc, bcc=bcc)
+        return _save_draft(mail, "email", open_in_outlook, to=to, cc=cc, bcc=bcc, files_attached=files)
 
     try:
-        return await bridge.call(_draft, to, subject, body, cc, bcc, html_body, account, open_in_outlook)
+        return await bridge.call(_draft, to, subject, body, cc, bcc, html_body, account, attachments, open_in_outlook)
     except Exception as e:
         return f"Error writing draft: {format_com_error(e)}"
 
@@ -462,6 +535,39 @@ async def draft_email(
 # =====================================================================
 # TOOL 2: list_emails
 # =====================================================================
+
+def _stores_for(namespace, account: str) -> list:
+    """``[store]`` for one account, or every visible store for account="all"."""
+    if (account or "").strip().lower() == "all":
+        return _visible_stores(namespace)
+    return [_require_store(namespace, account)]
+
+
+def _collect_across_stores(namespace, stores, folder: str, include_subfolders: bool,
+                           restriction: str, count: int, sender: str):
+    """Summaries newest-first across ``stores``; each tagged with its account when
+    more than one store is searched. Returns a JSON error string when a single
+    named store lacks the folder; with several stores, stores without it are skipped."""
+    merged = []
+    for store in stores:
+        target = _resolve_folder(namespace, folder, store)
+        if not target:
+            if len(stores) == 1:
+                return json.dumps({"error": f"Folder '{folder}' not found"})
+            continue
+        folders = []
+        if include_subfolders:
+            _folder_subtree(target, folders)
+        else:
+            folders.append(target)
+        found = _collect_summaries(folders, restriction, count, sender)
+        if len(stores) > 1:
+            for r in found:
+                r["account"] = str(store.DisplayName)
+        merged.extend(found)
+    merged.sort(key=lambda r: r.get("received_time") or "", reverse=True)
+    return merged[:count]
+
 
 def _collect_summaries(folders, restriction: str, count: int, sender: str) -> list:
     """Newest-first summaries across ``folders`` (restricted, optional sender filter)."""
@@ -528,8 +634,9 @@ async def list_emails(
             addresses are resolved to SMTP before matching.
         include_subfolders: If true, also search every subfolder of 'folder'
             (e.g. the whole Inbox tree). Default false.
-        account: Optional. Account display name (or substring) to target.
-            Default: primary account. Use list_accounts to see available accounts.
+        account: Optional. Account display name (or substring) to target, or
+            "all" for every account at once (each result then carries its
+            account). Default: the default account.
 
     Returns:
         JSON array of email summary objects.
@@ -537,15 +644,7 @@ async def list_emails(
     def _list(outlook, namespace, folder, count, unread_only, start_date, end_date,
               sender, include_subfolders, account):
         count = min(max(1, count), 200)
-        store = _require_store(namespace, account)
-        target = _resolve_folder(namespace, folder, store)
-        if not target:
-            return json.dumps({"error": f"Folder '{folder}' not found"})
-        folders = []
-        if include_subfolders:
-            _folder_subtree(target, folders)
-        else:
-            folders.append(target)
+        stores = _stores_for(namespace, account)
 
         # Build restriction filters
         restrictions = []
@@ -561,7 +660,10 @@ async def list_emails(
             # Default end to now when start is specified
             restrictions.append(f"[ReceivedTime] <= '{datetime.now().strftime('%m/%d/%Y %H:%M')}'")
 
-        results = _collect_summaries(folders, " AND ".join(restrictions), count, sender)
+        results = _collect_across_stores(namespace, stores, folder, include_subfolders,
+                                         " AND ".join(restrictions), count, sender)
+        if isinstance(results, str):
+            return results
         return json.dumps(results, indent=2, default=str)
 
     try:
@@ -654,6 +756,7 @@ async def get_conversation(
     entry_id: str,
     count: int = 30,
     include_bodies: bool = True,
+    max_body_chars: int = 0,
     account: str = "",
 ) -> str:
     """Return every message of the conversation an email belongs to, oldest first.
@@ -672,6 +775,9 @@ async def get_conversation(
             Default 30, max 200.
         include_bodies: If true (default), include each message's trimmed body.
             If false, return metadata only (much smaller).
+        max_body_chars: Cap each message's body at this many characters (0 =
+            no cap). Useful for a cheap look at a long thread; the newest
+            message is never cut.
         account: Optional. Account display name (or substring) the message lives
             in. Default: primary account.
 
@@ -679,19 +785,25 @@ async def get_conversation(
         JSON object: {"topic", "source", "message_count", "messages": [...]}
         where source is "conversation", "topic_search" or "none".
     """
-    def _get(outlook, namespace, entry_id, count, include_bodies, account):
+    def _get(outlook, namespace, entry_id, count, include_bodies, max_body_chars, account):
         count = min(max(1, count), 200)
+        max_body_chars = max(0, int(max_body_chars or 0))
         store = _require_store(namespace, account)
         item = namespace.GetItemFromID(entry_id, store.StoreID) if account else namespace.GetItemFromID(entry_id)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
             return err
         messages, source = conversation_items(store, item, limit=count)
         out = []
-        for path, node in messages:
+        newest_index = len(messages) - 1
+        for index, (path, node) in enumerate(messages):
             try:
                 record = format_email_full(node) if include_bodies else format_email_summary(node)
                 record["folder"] = path or record.get("folder", "")
                 record["is_requested_message"] = str(node.EntryID) == str(item.EntryID)
+                body_text = record.get("body")
+                if max_body_chars and index != newest_index and isinstance(body_text, str) and len(body_text) > max_body_chars:
+                    record["body"] = body_text[:max_body_chars]
+                    record["body_capped_at"] = max_body_chars
                 out.append(record)
             except Exception:
                 continue
@@ -704,7 +816,7 @@ async def get_conversation(
         }, indent=2, default=str)
 
     try:
-        return await bridge.call(_get, entry_id, count, include_bodies, account)
+        return await bridge.call(_get, entry_id, count, include_bodies, max_body_chars, account)
     except Exception as e:
         return f"Error reading conversation: {format_com_error(e)}"
 
@@ -844,6 +956,7 @@ async def draft_reply(
     body: str,
     reply_all: bool = False,
     account: str = "",
+    attachments: str = "",
     open_in_outlook: bool | None = None,
 ) -> str:
     """Write a reply to an email as a draft. It is NOT sent.
@@ -867,6 +980,8 @@ async def draft_reply(
             If false (default), address only the sender.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
+        attachments: Optional. Full path(s) of file(s) on this PC to attach,
+            separated by semicolons.
         open_in_outlook: Optional. True also opens the draft in an Outlook
             window; false only saves it to Drafts. Leave unset to follow the
             OUTLOOK_MCP_OPEN_DRAFTS setting (default: only save).
@@ -875,7 +990,7 @@ async def draft_reply(
         JSON with status "draft_saved", sent=false, entry_id of the draft and
         the folder it is in. Tell the user the draft is waiting for them.
     """
-    def _reply(outlook, namespace, entry_id, body, reply_all, account, open_in_outlook):
+    def _reply(outlook, namespace, entry_id, body, reply_all, account, attachments, open_in_outlook):
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
@@ -884,15 +999,16 @@ async def draft_reply(
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
             return err
         reply_item = item.ReplyAll() if reply_all else item.Reply()
+        files = _attach_files(reply_item, attachments)
         _write_draft_text(reply_item, body)
         return _save_draft(
             reply_item, "reply_all" if reply_all else "reply", open_in_outlook,
             in_reply_to=str(item.Subject or ""), to=str(_safe_get(lambda: reply_item.To) or ""),
-            cc=str(_safe_get(lambda: reply_item.CC) or ""),
+            cc=str(_safe_get(lambda: reply_item.CC) or ""), files_attached=files,
         )
 
     try:
-        return await bridge.call(_reply, entry_id, body, reply_all, account, open_in_outlook)
+        return await bridge.call(_reply, entry_id, body, reply_all, account, attachments, open_in_outlook)
     except Exception as e:
         return f"Error writing reply draft: {format_com_error(e)}"
 
@@ -942,6 +1058,7 @@ async def draft_forward(
     account: str = "",
     forward_latest_in_thread: bool = True,
     include_thread_attachments: bool = False,
+    attachments: str = "",
     open_in_outlook: bool | None = None,
 ) -> str:
     """Forward an email as a draft. It is NOT sent.
@@ -982,6 +1099,8 @@ async def draft_forward(
             messages in the same conversation are added to the forward too,
             skipping duplicates (same filename and size) and inline pictures.
             Default false.
+        attachments: Optional. Full path(s) of file(s) on this PC to attach in
+            addition, separated by semicolons.
         open_in_outlook: Optional. True also opens the draft in an Outlook
             window; false only saves it to Drafts. Leave unset to follow the
             OUTLOOK_MCP_OPEN_DRAFTS setting (default: only save).
@@ -994,7 +1113,7 @@ async def draft_forward(
         user where the draft is.
     """
     def _forward(outlook, namespace, entry_id, to, body, cc, bcc, account,
-                 forward_latest_in_thread, include_thread_attachments, open_in_outlook):
+                 forward_latest_in_thread, include_thread_attachments, attachments, open_in_outlook):
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
@@ -1058,16 +1177,18 @@ async def draft_forward(
                         "from_entry_id": str(_safe_get(lambda: node.EntryID) or ""),
                     })
 
+        files = _attach_files(fwd, attachments)
         _write_draft_text(fwd, body)
+        source_id = str(_safe_get(lambda: source.EntryID) or "")
+        newest_id = str(_safe_get(lambda: thread[-1][1].EntryID) or "") if thread else source_id
         try:
             return _save_draft(
                 fwd, "forward", open_in_outlook,
-                forwarded_entry_id=str(_safe_get(lambda: source.EntryID) or ""),
+                forwarded_entry_id=source_id,
                 forwarded_subject=str(_safe_get(lambda: source.Subject) or ""),
-                forwarded_is_latest=(not thread) or source is thread[-1][1] or
-                    str(_safe_get(lambda: source.EntryID) or "") == str(_safe_get(lambda: thread[-1][1].EntryID) or ""),
+                forwarded_is_latest=(source_id == newest_id),
                 to=str(_safe_get(lambda: fwd.To) or ""), cc=str(_safe_get(lambda: fwd.CC) or ""),
-                attachments_added=attachments_added,
+                attachments_added=attachments_added, files_attached=files,
             )
         finally:
             if tmpdir:
@@ -1076,7 +1197,7 @@ async def draft_forward(
     try:
         return await bridge.call(
             _forward, entry_id, to, body, cc, bcc, account,
-            forward_latest_in_thread, include_thread_attachments, open_in_outlook,
+            forward_latest_in_thread, include_thread_attachments, attachments, open_in_outlook,
         )
     except Exception as e:
         return f"Error writing forward draft: {format_com_error(e)}"
@@ -1208,15 +1329,7 @@ async def search_emails(
         count = min(max(1, count), 200)
         if not query and not sender:
             return json.dumps({"error": "Provide a query, a sender, or both"})
-        store = _require_store(namespace, account)
-        target = _resolve_folder(namespace, folder, store)
-        if not target:
-            return json.dumps({"error": f"Folder '{folder}' not found"})
-        folders = []
-        if include_subfolders:
-            _folder_subtree(target, folders)
-        else:
-            folders.append(target)
+        stores = _stores_for(namespace, account)
 
         dasl_parts = []
         if query:
@@ -1241,7 +1354,9 @@ async def search_emails(
             )
 
         filter_str = ("@SQL=" + " AND ".join(dasl_parts)) if dasl_parts else ""
-        results = _collect_summaries(folders, filter_str, count, sender)
+        results = _collect_across_stores(namespace, stores, folder, include_subfolders, filter_str, count, sender)
+        if isinstance(results, str):
+            return results
         return json.dumps(results, indent=2, default=str)
 
     try:
@@ -2272,8 +2387,569 @@ async def get_out_of_office(account: str = "") -> str:
 # Entry point
 # =====================================================================
 
+# =====================================================================
+# SETTINGS: get_settings / set_setting
+# =====================================================================
+
+@mcp.tool()
+async def get_settings() -> str:
+    """Show the server's settings, where each value comes from, and which account
+    tools use when none is named.
+
+    Settings: default_account, hide_accounts, open_drafts, font_family,
+    font_size_pt, font_color, plain_text. Each value comes from an environment
+    variable (set in Claude's config), the settings file (written by
+    set_setting), or the built-in default; "source" says which. Change one with
+    set_setting.
+
+    Returns:
+        JSON with settings_file, settings {key: {value, source, env_var, help}}
+        and effective_default_account.
+    """
+    def _get(outlook, namespace):
+        store = _resolve_store(namespace, "")
+        return json.dumps({
+            "settings_file": str(settings.settings_path()),
+            "settings": settings.all_settings(),
+            "effective_default_account": str(store.DisplayName) if store is not None else None,
+            "note": "A value whose source is \"env\" is set in Claude's config and overrides the settings file; "
+                    "set_setting cannot change it until that env entry is removed.",
+        }, indent=2, default=str)
+
+    try:
+        return await bridge.call(_get)
+    except Exception as e:
+        return f"Error reading settings: {format_com_error(e)}"
+
+
+@mcp.tool()
+async def set_setting(key: str, value: str = "", clear: bool = False) -> str:
+    """Change one server setting. Takes effect immediately and survives restarts.
+
+    Keys:
+        default_account: account used when a tool is not given one, e.g.
+            "make HGP my default" -> set_setting("default_account", "heartland").
+            Checked against the accounts in Outlook; a unique substring is enough
+            and the full display name is stored.
+        hide_accounts: accounts to leave out of list_accounts and account="all",
+            as a semicolon-separated list of display-name substrings.
+        open_drafts: "true" to open each new draft in an Outlook window,
+            "false" to only save it.
+        font_family, font_size_pt, font_color, plain_text: how draft text is written.
+
+    Args:
+        key: One of the keys above.
+        value: The new value. For hide_accounts, substrings separated by ";".
+        clear: If true, remove the key from the settings file so the default
+            (or an environment variable, if set) applies again.
+
+    Returns:
+        JSON with the key, what was saved, the value now in effect and its
+        source. If an environment variable overrides this key, says so.
+    """
+    def _set(outlook, namespace, key, value, clear):
+        key = (key or "").strip()
+        if key not in settings.SETTINGS:
+            return json.dumps({"error": f"Unknown setting {key!r}", "known": list(settings.SETTINGS)})
+        if clear:
+            settings.clear_value(key)
+        else:
+            value = (value or "").strip()
+            if key == "default_account" and value:
+                names = [str(namespace.Stores.Item(i + 1).DisplayName) for i in range(namespace.Stores.Count)]
+                exact = [n for n in names if n.lower() == value.lower()]
+                partial = [n for n in names if value.lower() in n.lower()]
+                hits = exact or partial
+                if not hits:
+                    return json.dumps({"error": f"No account matches {value!r}", "accounts": names})
+                if len(hits) > 1:
+                    return json.dumps({"error": f"{value!r} matches more than one account; be more specific", "matches": hits})
+                value = hits[0]
+            if key == "hide_accounts" and value:
+                names = [str(namespace.Stores.Item(i + 1).DisplayName).lower() for i in range(namespace.Stores.Count)]
+                unknown = [part.strip() for part in value.split(";") if part.strip()
+                           and not any(part.strip().lower() in n for n in names)]
+                if unknown:
+                    logger.warning("hide_accounts entries match no account right now: %s", unknown)
+            settings.set_value(key, value)
+        now, source = settings.get_with_source(key)
+        out = {"key": key, "cleared": clear, "saved": None if clear else value, "effective": now, "source": source,
+               "settings_file": str(settings.settings_path())}
+        if source == "env":
+            out["warning"] = (f"{settings.SETTINGS[key]['env']} is set in Claude's config and overrides this. "
+                              "Remove it there (and restart Claude) for the saved value to apply.")
+        return json.dumps(out, indent=2, default=str)
+
+    try:
+        return await bridge.call(_set, key, value, clear)
+    except Exception as e:
+        return f"Error changing setting: {format_com_error(e)}"
+
+
+# =====================================================================
+# TOOL: read_attachment
+# =====================================================================
+
+_OL_ATTACH_EMBEDDED_ITEM = 5
+
+
+@mcp.tool()
+async def read_attachment(
+    entry_id: str,
+    attachment_index: int = 1,
+    max_chars: int = 20000,
+    pages: str = "",
+    sheet: str = "",
+    account: str = "",
+) -> str:
+    """Read the text of an attachment without the user opening or saving it.
+
+    Works for PDF, Word (.docx), Excel (.xlsx/.xlsm), PowerPoint (.pptx), CSV,
+    plain text, HTML and attached Outlook messages (.msg). Old binary formats
+    (.doc/.xls/.ppt) and pictures are not readable; scanned PDFs have no text
+    and are reported as such. The file is copied to a temp folder for reading
+    and deleted afterwards; the mailbox is not changed.
+
+    Args:
+        entry_id: EntryID of the email or event holding the attachment.
+        attachment_index: Which attachment (1-based; see list_attachments).
+        max_chars: Cap on returned text. Default 20000. The result says if the
+            cap was hit; narrow with pages/sheet rather than raising it a lot.
+        pages: For PDF and PowerPoint: which pages/slides, e.g. "1-3,7".
+            Default all.
+        sheet: For Excel: a sheet name (or part of one). Default all sheets,
+            each capped at 500 rows.
+        account: Optional. Account display name (or substring). Only needed
+            if entry_id is ambiguous across stores.
+
+    Returns:
+        JSON with filename, size, kind, the extracted text, and details such as
+        pages_total / sheets / truncated.
+    """
+    def _read(outlook, namespace, entry_id, attachment_index, max_chars, pages, sheet, account):
+        if account:
+            store = _require_store(namespace, account)
+            item = namespace.GetItemFromID(entry_id, store.StoreID)
+        else:
+            item = namespace.GetItemFromID(entry_id)
+        count = int(_safe_get(lambda: item.Attachments.Count, 0) or 0)
+        if count == 0:
+            return json.dumps({"error": "This item has no attachments"})
+        if attachment_index < 1 or attachment_index > count:
+            return json.dumps({"error": f"attachment_index must be between 1 and {count}"})
+        att = item.Attachments.Item(attachment_index)
+        filename = str(_safe_get(lambda: att.FileName) or f"attachment{attachment_index}")
+        max_chars = max(500, min(int(max_chars or 20000), 200000))
+        tmpdir = tempfile.mkdtemp(prefix="outlook-mcp-read-")
+        try:
+            safe_name = re.sub(r"[\\/:*?\"<>|]", "_", filename) or "attachment"
+            path = os.path.join(tmpdir, safe_name)
+            att.SaveAsFile(path)
+            result = {"filename": filename, "size": int(_safe_get(lambda: att.Size, 0) or 0), "index": attachment_index}
+            if int(_safe_get(lambda: att.Type, 0) or 0) == _OL_ATTACH_EMBEDDED_ITEM or safe_name.lower().endswith(".msg"):
+                # An attached Outlook message: open it as an item and read it like an email.
+                try:
+                    inner = namespace.OpenSharedItem(path)
+                    record = format_email_full(inner, body_max_length=max_chars)
+                    record["kind"] = "msg"
+                    record["attachments"] = [
+                        {"index": i + 1, "filename": str(inner.Attachments.Item(i + 1).FileName)}
+                        for i in range(int(_safe_get(lambda: inner.Attachments.Count, 0) or 0))
+                    ]
+                    try:
+                        inner.Close(1)  # olDiscard
+                    except Exception:
+                        pass
+                    result.update(record)
+                    return json.dumps(result, indent=2, default=str)
+                except Exception as e:
+                    result["error"] = f"Could not open the attached message: {format_com_error(e)}"
+                    return json.dumps(result, indent=2, default=str)
+            text, info = extract(path, max_chars=max_chars, pages=pages, sheet=sheet)
+            result.update(info)
+            result["text"] = text
+            return json.dumps(result, indent=2, default=str)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    try:
+        return await bridge.call(_read, entry_id, attachment_index, max_chars, pages, sheet, account)
+    except Exception as e:
+        return f"Error reading attachment: {format_com_error(e)}"
+
+
+# =====================================================================
+# TOOL: contact_history
+# =====================================================================
+
+@mcp.tool()
+async def contact_history(
+    person: str,
+    days: int = 365,
+    count: int = 10,
+    account: str = "all",
+    include_meetings: bool = True,
+) -> str:
+    """Everything recent with one person, in one call: when they last wrote, when
+    the user last wrote to them, the recent messages in both directions, and the
+    last and next meetings with them. Looks across every account (unless one is
+    named), the whole Inbox tree, Sent Items and every calendar.
+
+    Args:
+        person: Part of the person's name or email address, e.g. "chad" or
+            "tworld.com". Case-insensitive.
+        days: How far back to look. Default 365.
+        count: Messages to return per direction per account (and in the merged
+            timeline). Default 10, max 50.
+        account: "all" (default) for every visible account, or one account's
+            display name (or substring).
+        include_meetings: Also scan calendars for meetings with this person.
+            Default true.
+
+    Returns:
+        JSON with last_received, last_sent, received_count, sent_count, recent
+        (merged timeline, newest first, each tagged direction and account) and
+        meetings {last, next, past_count, upcoming_count}.
+    """
+    def _history(outlook, namespace, person, days, count, account, include_meetings):
+        needle = (person or "").strip()
+        if not needle:
+            return json.dumps({"error": "person is required"})
+        needle_lower = needle.lower()
+        count = min(max(1, int(count)), 50)
+        days = min(max(1, int(days)), 3650)
+        now = datetime.now()
+        since = now - timedelta(days=days)
+        stores = _visible_stores(namespace) if (account or "").strip().lower() == "all" else [_require_store(namespace, account)]
+        safe = _safe_dasl(needle)
+        stamp = since.strftime('%m/%d/%Y %H:%M')
+        received: list = []
+        sent: list = []
+        searched = []
+        for store in stores:
+            name = str(store.DisplayName)
+            searched.append(name)
+            # Received: Inbox tree, matched on sender name or address by Outlook itself.
+            folders: list = []
+            try:
+                _folder_subtree(store.GetDefaultFolder(OL_FOLDER_INBOX), folders)
+            except Exception:
+                folders = []
+            dasl = ('@SQL=("urn:schemas:httpmail:fromname" LIKE \'%' + safe + '%\' OR '
+                    '"urn:schemas:httpmail:fromemail" LIKE \'%' + safe + '%\') AND '
+                    '"urn:schemas:httpmail:datereceived" >= \'' + stamp + '\'')
+            for r in _collect_summaries(folders, dasl, count, ""):
+                r["account"] = name
+                r["direction"] = "received"
+                received.append(r)
+            # Sent: scan Sent Items newest-first within the window, matching To/CC/BCC names or addresses.
+            try:
+                items = store.GetDefaultFolder(OL_FOLDER_SENT_MAIL).Items
+                items.Sort("[SentOn]", True)
+                items = items.Restrict(f"[SentOn] >= '{stamp}'")
+            except Exception:
+                items = None
+            matched = 0
+            for item in (_iter_items(items, _SENDER_SCAN_LIMIT) if items is not None else []):
+                try:
+                    if int(item.Class) != _OL_CLASS_MAIL:
+                        continue
+                    hay = " ".join(str(_safe_get(lambda a=a: getattr(item, a)) or "") for a in ("To", "CC", "BCC")).lower()
+                    hit = needle_lower in hay
+                    if not hit:
+                        for rec in format_recipients(item):
+                            if needle_lower in (rec.get("address") or "") or needle_lower in (rec.get("name") or "").lower():
+                                hit = True
+                                break
+                    if not hit:
+                        continue
+                    r = format_email_summary(item)
+                    r["account"] = name
+                    r["direction"] = "sent"
+                    r["sent_time"] = iso(_safe_get(lambda: item.SentOn, None))
+                    sent.append(r)
+                    matched += 1
+                    if matched >= count:
+                        break
+                except Exception:
+                    continue
+        received.sort(key=lambda r: r.get("received_time") or "", reverse=True)
+        sent.sort(key=lambda r: r.get("sent_time") or r.get("received_time") or "", reverse=True)
+        timeline = sorted(received + sent, key=lambda r: r.get("sent_time") or r.get("received_time") or "", reverse=True)[:count]
+
+        meetings = None
+        if include_meetings:
+            past: list = []
+            upcoming: list = []
+            horizon = now + timedelta(days=90)
+            for store in stores:
+                try:
+                    calendars = resolve_calendars(store, "all")
+                except Exception:
+                    continue
+                for ev in _events_in(calendars, since, horizon, 500):
+                    if ev.get("error"):
+                        continue
+                    who = " ".join(str(ev.get(k) or "") for k in ("organizer", "required_attendees", "optional_attendees")).lower()
+                    if needle_lower not in who:
+                        continue
+                    ev["account"] = str(store.DisplayName)
+                    (upcoming if (ev.get("start") or "") >= now.isoformat(timespec="minutes") else past).append(ev)
+            past.sort(key=lambda e: e.get("start") or "")
+            upcoming.sort(key=lambda e: e.get("start") or "")
+            meetings = {"last": past[-1] if past else None, "next": upcoming[0] if upcoming else None,
+                        "past_count": len(past), "upcoming_count": len(upcoming)}
+
+        return json.dumps({
+            "person": needle,
+            "window_days": days,
+            "accounts_searched": searched,
+            "last_received": received[0] if received else None,
+            "last_sent": sent[0] if sent else None,
+            "received_count": len(received),
+            "sent_count": len(sent),
+            "counts_note": f"Counts are capped at {count} per direction per account; raise count for more.",
+            "recent": timeline,
+            "meetings": meetings,
+        }, indent=2, default=str)
+
+    try:
+        return await bridge.call(_history, person, days, count, account, include_meetings)
+    except Exception as e:
+        return f"Error building contact history: {format_com_error(e)}"
+
+
+# =====================================================================
+# TOOL: update_draft
+# =====================================================================
+
+@mcp.tool()
+async def update_draft(
+    entry_id: str,
+    body: str = "",
+    html_body: str = "",
+    subject: str = "",
+    to: str = "",
+    cc: str = "",
+    bcc: str = "",
+    account: str = "",
+    replace_body: bool = False,
+    open_in_outlook: bool | None = None,
+) -> str:
+    """Change an existing draft instead of creating a new one. It is NOT sent.
+
+    BEFORE CALLING THIS: show the revised draft in the chat first and ask
+    explicitly whether to apply it to the draft in Outlook; call this tool only
+    after the user says yes.
+
+    The server marks the note it writes into a draft, so a new body replaces
+    just that note and leaves the signature and any quoted thread underneath
+    untouched. Subject and recipients can be changed independently. Works on
+    drafts in the Drafts folder (new emails, replies, forwards).
+
+    Args:
+        entry_id: EntryID of the draft (returned when it was created, or from
+            list_emails with folder="drafts").
+        body: New note text, plain prose with blank-line paragraphs. Leave empty
+            to keep the current text.
+        html_body: New note as HTML instead of body.
+        subject: New subject. Empty = unchanged.
+        to, cc, bcc: New recipient lists (semicolons). Empty = unchanged; each
+            one given replaces that whole list.
+        account: Optional. Account display name (or substring). Only needed
+            if entry_id is ambiguous across stores.
+        replace_body: If the draft has no marked note (it was written in Outlook,
+            or edited there in a way that lost the marker), the body cannot be
+            replaced safely and the tool says so. Pass true to overwrite the
+            whole body anyway (signature and quoted text are lost).
+        open_in_outlook: Optional. True also opens the draft in an Outlook
+            window. Leave unset to follow the OUTLOOK_MCP_OPEN_DRAFTS setting.
+
+    Returns:
+        JSON with status "draft_saved", sent=false, entry_id, folder and the
+        list of fields changed.
+    """
+    def _update(outlook, namespace, entry_id, body, html_body, subject, to, cc, bcc, account, replace_body, open_in_outlook):
+        if account:
+            store = _require_store(namespace, account)
+            item = namespace.GetItemFromID(entry_id, store.StoreID)
+        else:
+            item = namespace.GetItemFromID(entry_id)
+        if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
+            return err
+        if bool(_safe_get(lambda: item.Sent, False)):
+            return json.dumps({"error": "That message has already been sent; only drafts can be updated."})
+        changed = []
+        if subject:
+            item.Subject = subject
+            changed.append("subject")
+        if to:
+            item.To = to
+            changed.append("to")
+        if cc:
+            item.CC = cc
+            changed.append("cc")
+        if bcc:
+            item.BCC = bcc
+            changed.append("bcc")
+        if body or html_body:
+            if plain_text_mode():
+                item.Body = body or html_body
+                changed.append("body (plain text, whole body replaced)")
+            else:
+                fragment = style_html(html_body) if html_body else text_to_html(body)
+                current = str(_safe_get(lambda: item.HTMLBody) or "")
+                new_html = replace_note(current, fragment)
+                if new_html is None:
+                    if not replace_body:
+                        return json.dumps({
+                            "error": "This draft has no marked note section to replace (it was not written by this "
+                                     "server, or it was edited in Outlook and the marker was lost). Pass "
+                                     "replace_body=true to overwrite the whole body, or make the edit in Outlook.",
+                            "entry_id": entry_id,
+                        })
+                    new_html = wrap_note(fragment)
+                    changed.append("body (whole body replaced)")
+                else:
+                    changed.append("body")
+                item.HTMLBody = new_html
+        if not changed:
+            return json.dumps({"error": "Nothing to change: give a body, subject or recipients."})
+        return _save_draft(item, "update", open_in_outlook, changed=changed,
+                           subject=str(_safe_get(lambda: item.Subject) or ""),
+                           to=str(_safe_get(lambda: item.To) or ""), cc=str(_safe_get(lambda: item.CC) or ""))
+
+    try:
+        return await bridge.call(_update, entry_id, body, html_body, subject, to, cc, bcc, account, replace_body, open_in_outlook)
+    except Exception as e:
+        return f"Error updating draft: {format_com_error(e)}"
+
+
+# =====================================================================
+# TOOL: add_attachment
+# =====================================================================
+
+@mcp.tool()
+async def add_attachment(entry_id: str, paths: str, account: str = "") -> str:
+    """Attach one or more files from this PC to an existing draft (email, reply,
+    forward or unsent meeting). Nothing is sent.
+
+    Args:
+        entry_id: EntryID of the draft.
+        paths: Full path(s) of the file(s) on this computer, separated by
+            semicolons, e.g. "C:\\Users\\me\\Documents\\Model.xlsx".
+        account: Optional. Account display name (or substring). Only needed
+            if entry_id is ambiguous across stores.
+
+    Returns:
+        JSON with the files attached (filename, size) and the draft's entry_id.
+    """
+    def _add(outlook, namespace, entry_id, paths, account):
+        if account:
+            store = _require_store(namespace, account)
+            item = namespace.GetItemFromID(entry_id, store.StoreID)
+        else:
+            item = namespace.GetItemFromID(entry_id)
+        if bool(_safe_get(lambda: item.Sent, False)):
+            return json.dumps({"error": "That message has already been sent; files can only be added to drafts."})
+        added = _attach_files(item, paths)
+        item.Save()
+        return json.dumps({"status": "attached", "entry_id": str(_safe_get(lambda: item.EntryID) or entry_id),
+                           "files_attached": added, "attachment_count": int(_safe_get(lambda: item.Attachments.Count, 0) or 0)},
+                          indent=2, default=str)
+
+    try:
+        return await bridge.call(_add, entry_id, paths, account)
+    except Exception as e:
+        return f"Error adding attachment: {format_com_error(e)}"
+
+
+# =====================================================================
+# TOOL: health_check
+# =====================================================================
+
+@mcp.tool()
+async def health_check() -> str:
+    """Report whether the connector is working and why not if it isn't: server
+    version, Outlook running and its version, accounts loaded and which one is
+    the default for tools, current settings, and whether Outlook is blocking
+    address access behind its "A program is trying to access..." prompt.
+
+    Use this first when something fails, especially from a phone where the
+    laptop screen cannot be seen.
+
+    Returns:
+        JSON with status ("ok" or "degraded"), the checks above, and a
+        plain-language "warning" when something needs the user's attention.
+    """
+    result: dict = {
+        "server_version": __version__,
+        "python": sys.version.split()[0],
+        "platform": f"{platform.system()} {platform.machine()}",
+        "settings_file": str(settings.settings_path()),
+        "settings": {k: v["value"] for k, v in settings.all_settings().items()},
+    }
+    warnings: list[str] = []
+
+    def _basic(outlook, namespace):
+        stores = []
+        default_id = str(namespace.DefaultStore.StoreID)
+        for i in range(namespace.Stores.Count):
+            store = namespace.Stores.Item(i + 1)
+            stores.append({
+                "display_name": str(store.DisplayName),
+                "is_outlook_default": str(store.StoreID) == default_id,
+                "hidden": _is_hidden_store(store),
+            })
+        tools_default = _resolve_store(namespace, "")
+        return {
+            "outlook_running": True,
+            "outlook_version": str(_safe_get(lambda: outlook.Version) or ""),
+            "accounts": stores,
+            "default_account_for_tools": str(tools_default.DisplayName) if tools_default is not None else None,
+        }
+
+    try:
+        result.update(await bridge.call(_basic))
+    except Exception as e:
+        result["outlook_running"] = False
+        result["error"] = format_com_error(e)
+        warnings.append("Outlook is not reachable. Make sure classic Outlook is open (the 'New Outlook' switch off) and try again.")
+
+    if result.get("outlook_running"):
+        def _probe(outlook, namespace):
+            store = _resolve_store(namespace, "")
+            items = store.GetDefaultFolder(OL_FOLDER_INBOX).Items
+            items.Sort("[ReceivedTime]", True)
+            item = items.GetFirst()
+            if item is not None:
+                _ = str(_safe_get(lambda: item.SenderEmailAddress) or "")
+                _ = get_smtp(item)
+            return True
+
+        try:
+            await bridge.call(_probe, _timeout=4)
+            result["address_access"] = "ok"
+        except TimeoutError:
+            result["address_access"] = "blocked"
+            warnings.append("Outlook is probably showing its 'A program is trying to access email address information' "
+                            "prompt. On the laptop, click 'Allow access for 10 minutes'. See README for permanent options.")
+        except Exception as e:
+            result["address_access"] = f"error: {format_com_error(e)}"
+
+    preferred = settings.get("default_account")
+    if preferred and result.get("accounts") and not any(preferred.lower() in a["display_name"].lower() for a in result["accounts"]):
+        warnings.append(f"default_account is set to {preferred!r} but no loaded account matches it; Outlook's own default is being used.")
+
+    result["status"] = "ok" if not warnings else "degraded"
+    if warnings:
+        result["warning"] = " ".join(warnings)
+    return json.dumps(result, indent=2, default=str)
+
+
+
 def main():
-    logger.info("Starting Outlook Desktop MCP server...")
+    logger.info("Starting Outlook Desktop MCP server %s...", __version__)
     bridge.start()
     logger.info("COM bridge ready. Starting MCP stdio transport...")
     try:

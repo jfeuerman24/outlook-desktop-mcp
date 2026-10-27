@@ -6,7 +6,8 @@
   Does, in order, skipping anything already done:
     1. Checks this is Windows and that classic Outlook is installed.
     2. Finds Python 3.12 or newer. If there is none, installs it with winget.
-    3. Creates .venv next to this script and installs the server into it.
+    3. Creates .venv next to this script and installs the server and its libraries into it
+       (re-running adds any library a newer version of the server needs).
     4. Adds the server to Claude's settings file (%APPDATA%\Claude\claude_desktop_config.json),
        keeping everything already in that file and saving a backup first.
   Nothing here sends mail, touches the mailbox, or needs administrator rights
@@ -199,6 +200,10 @@ if (-not (Test-Path $venvPy)) {
 }
 
 $exe = Join-Path $venvDir 'Scripts\outlook-desktop-mcp.exe'
+# Wheels only: avoids compiling anything, which matters on ARM64 where some
+# packages have no prebuilt wheel for the versions pip would otherwise pick.
+$Packages = @("pywin32>=310", "mcp>=1.26.0,<2", "pypdf>=4", "python-docx>=1.1", "openpyxl>=3.1", "python-pptx>=0.6.23")
+$ImportCheck = "import win32com.client, mcp, pypdf, docx, openpyxl, pptx, outlook_desktop_mcp; print('ok')"
 
 # Already installed and working? Then leave it alone. Reinstalling over a server that Claude
 # is currently running fails (Windows will not overwrite a program in use), and there is
@@ -207,6 +212,7 @@ $alreadyInstalled = $false
 if (Test-Path $exe) {
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try {
+        # The server itself loads? (Libraries are checked separately: adding one must not force a reinstall.)
         $importOut = & $venvPy -c "import win32com.client, mcp, outlook_desktop_mcp; print('ok')" 2>&1
         $alreadyInstalled = ($LASTEXITCODE -eq 0)
         if (-not $alreadyInstalled) {
@@ -218,6 +224,10 @@ if (Test-Path $exe) {
 
 if ($alreadyInstalled) {
     Ok "Server already installed: $exe (delete the .venv folder to reinstall from scratch)"
+    # Libraries can be added or updated while the server is running: pip never touches the exe for these.
+    Run "Checking libraries" { & $venvPy -m pip install --quiet --disable-pip-version-check --only-binary=:all: @Packages }
+    Run "Verifying imports" { & $venvPy -c $ImportCheck }
+    Ok "Libraries present"
 } else {
     if (Get-Process -Name outlook-desktop-mcp -ErrorAction SilentlyContinue) {
         throw "outlook-desktop-mcp.exe is running (Claude is using it) so it cannot be replaced. Quit the Claude desktop app from the system tray, then run this again."
@@ -227,15 +237,13 @@ if ($alreadyInstalled) {
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
     Run "Upgrading pip" { & $venvPy -m pip install --quiet --disable-pip-version-check --upgrade pip }
-    # Wheels only: avoids compiling anything, which matters on ARM64 where some
-    # packages have no prebuilt wheel for the versions pip would otherwise pick.
-    Run "Installing pywin32 and mcp" { & $venvPy -m pip install --quiet --disable-pip-version-check --only-binary=:all: "pywin32>=310" "mcp>=1.26.0,<2" }
+    Run "Installing libraries" { & $venvPy -m pip install --quiet --disable-pip-version-check --only-binary=:all: @Packages }
     Run "Installing outlook-desktop-mcp" { & $venvPy -m pip install --quiet --disable-pip-version-check --no-deps -e $Root }
     # Registers the pywin32 DLLs; harmless if it has already been done or is not needed.
     Quiet { & $venvPy -m pywin32_postinstall -install }
     Ok "Packages installed"
 
-    Run "Verifying imports" { & $venvPy -c "import win32com.client, mcp, outlook_desktop_mcp; print('imports ok')" }
+    Run "Verifying imports" { & $venvPy -c $ImportCheck }
     if (-not (Test-Path $exe)) { throw "Expected $exe after install, but it is not there." }
     Ok "Server executable: $exe"
 }

@@ -1,6 +1,6 @@
 [project]
 name = "outlook-desktop-mcp"
-version = "0.4.0"
+version = "0.5.0"
 description = "Classic Outlook Desktop on Windows as an MCP server: read mail, calendars and tasks; write drafts, never send. No Graph API, no Entra app registration."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -20,6 +20,10 @@ classifiers = [
 dependencies = [
     "pywin32>=310",
     "mcp[cli]>=1.26.0,<2",  # 2.x renamed FastMCP to MCPServer; this code targets the 1.x API
+    "pypdf>=4",            # read_attachment: PDF
+    "python-docx>=1.1",    # read_attachment: Word
+    "openpyxl>=3.1",       # read_attachment: Excel
+    "python-pptx>=0.6.23", # read_attachment: PowerPoint
 ]
 
 [project.urls]
