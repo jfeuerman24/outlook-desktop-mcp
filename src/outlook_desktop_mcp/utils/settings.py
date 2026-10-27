@@ -44,6 +44,22 @@ SETTINGS: dict[str, dict] = {
                    "help": "Font colour for draft text."},
     "plain_text": {"env": "OUTLOOK_MCP_PLAIN_TEXT", "type": "bool", "default": False,
                    "help": "Write drafts as plain text instead of styled HTML."},
+    "include_shared_in_all": {
+        "env": "OUTLOOK_MCP_INCLUDE_SHARED_IN_ALL", "type": "bool", "default": False,
+        "help": "Include shared Exchange mailboxes that are not cached locally in account=\"all\" "
+                "searches. Off = skip them (every folder listing in such a mailbox is a server round "
+                "trip and can take tens of seconds); they can still be named explicitly.",
+    },
+    "call_timeout_s": {
+        "env": "OUTLOOK_MCP_CALL_TIMEOUT_S", "type": "str", "default": "60",
+        "help": "Seconds a tool call may take. Long searches stop a few seconds before this and "
+                "return what they found so far, marked partial.",
+    },
+    "legacy_mode": {
+        "env": "OUTLOOK_MCP_LEGACY_MODE", "type": "bool", "default": False,
+        "help": "Use the pre-0.6 search code paths (Python walks every message instead of asking "
+                "Outlook to filter). Much slower; only for troubleshooting the new paths.",
+    },
 }
 
 _lock = threading.Lock()
