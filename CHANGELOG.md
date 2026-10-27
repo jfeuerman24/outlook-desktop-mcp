@@ -3,6 +3,15 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## 0.9.2 - 2026-10-27
+
+### Changed
+- `health_check` no longer reads like a warning about body-text search. `body_search_index`
+  is now a plain status ("indexed" or "not indexed", with the probe word) rather than a
+  sentence about slow scans, and the tool description says it and `legacy_mode` are
+  diagnostics to mention only when the user asks about search speed. A version question got
+  a lecture about search indexing; it should not.
+
 ## 0.9.1 - 2026-10-27
 
 ### Changed

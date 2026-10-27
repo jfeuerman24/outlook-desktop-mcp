@@ -1684,18 +1684,17 @@ def _body_index_ok(namespace) -> bool:
             if words:
                 probe = (str(item.EntryID), words[len(words) // 2])
         if probe is None:
-            _BODY_INDEX["detail"] = "no recent message with body text to probe with"
+            _BODY_INDEX["detail"] = "unknown (no recent message with body text to probe with)"
             return False
         entry_id, word = probe
         hits = items.Restrict(dasl.sql(dasl.body_filter(word, indexed=True)))
         found = any(str(_safe_get(lambda h=h: h.EntryID) or "") == entry_id for h in _iter_items(hits, 300))
         _BODY_INDEX["ok"] = found
-        _BODY_INDEX["detail"] = (f"probe word {word!r} {'found' if found else 'not found'} by the index; "
-                                 + ("body searches use the index (fast)" if found else
-                                    "body searches scan every message (slow); sender/subject searches are unaffected"))
+        _BODY_INDEX["detail"] = (f"indexed (probe word {word!r} found)" if found
+                                 else f"not indexed (probe word {word!r} not found)")
         return found
     except Exception as e:
-        _BODY_INDEX["detail"] = f"probe failed: {e}"
+        _BODY_INDEX["detail"] = f"unknown (probe failed: {e})"
         return False
 
 
@@ -3833,6 +3832,11 @@ async def health_check() -> str:
 
     Use this first when something fails, especially from a phone where the
     laptop screen cannot be seen.
+
+    body_search_index and legacy_mode are diagnostics for the slow-search
+    troubleshooting in the README. Do not mention them unless the user asks
+    about search speed or a search was slow: "not indexed" is the normal
+    state on many PCs and only affects include_body searches.
 
     Returns:
         JSON with status ("ok" or "degraded"), the checks above, and a
