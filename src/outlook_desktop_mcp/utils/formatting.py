@@ -62,6 +62,7 @@ def format_email_summary(item) -> dict:
         "attachment_count": item.Attachments.Count,
         "conversation_id": str(_safe(lambda: item.ConversationID)),
         "thread_depth": thread_depth(_safe(lambda: item.ConversationIndex, None)),
+        "categories": str(_safe(lambda: item.Categories)),
     }
 
 
@@ -99,6 +100,7 @@ def format_event_summary(item, calendar: str = "") -> dict:
         "meeting_status": MEETING_STATUS_NAMES.get(item.MeetingStatus, "unknown"),
         "required_attendees": item.RequiredAttendees or "",
         "optional_attendees": item.OptionalAttendees or "",
+        "categories": str(_safe(lambda: item.Categories)),
     }
     if calendar:
         summary["calendar"] = calendar

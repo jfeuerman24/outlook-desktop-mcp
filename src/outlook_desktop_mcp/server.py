@@ -122,9 +122,9 @@ _INSTRUCTIONS = (
     "This MCP server gives access to Microsoft Outlook Desktop on Windows via "
     "COM automation. It can read, search and organise mail, calendars and "
     "tasks, and it can WRITE DRAFTS.\n\n"
-    "NOTHING THIS SERVER DOES SENDS A MESSAGE. draft_email, draft_reply, draft_forward "
-    "and draft_meeting save the item (to Drafts, or to the calendar with invitations "
-    "unsent). By default an unsent meeting opens in an Outlook window and an email draft "
+    "NOTHING THIS SERVER DOES SENDS A MESSAGE. draft_email, draft_reply, draft_forward, "
+    "draft_forward_event and draft_meeting save the item (to Drafts, or to the calendar "
+    "with invitations unsent). By default an unsent meeting opens in an Outlook window and an email draft "
     "stays in Drafts without one (the open_in_outlook setting: none, meetings or all); "
     "the open_in_outlook tool opens any saved item when the user asks for that. The user "
     "reads it and presses Send themselves. There is no tool to send, to respond to an "
@@ -165,7 +165,9 @@ _INSTRUCTIONS = (
     "reply_context, contact_history, draft_email, draft_reply, draft_forward, "
     "update_draft, open_in_outlook, mark read/unread, move, attachments\n"
     "- Calendar: list_calendars, list events, create appointments, draft_meeting "
-    "(invitations unsent), update, delete (not organised meetings), search events\n"
+    "(invitations unsent), draft_forward_event (an invitation forwarded, unsent), "
+    "move_event (to another calendar or account), update, delete (not organised "
+    "meetings), search events\n"
     "- Tasks: create, list, complete, delete to-do items\n"
     "- Categories: list and set color categories on any item\n"
     "- Rules: list and enable/disable mail rules\n"
@@ -497,9 +499,10 @@ def _attach_files(item, paths: str) -> list[dict]:
     return added
 
 
-def _save_draft(item, kind: str, **extra) -> str:
+def _save_draft(item, kind: str, where: str = "in the Drafts folder", **extra) -> str:
     """Save ``item`` without sending, open it in Outlook if the open_in_outlook setting says
     drafts of this ``kind`` should open (by default only meetings do), describe the result.
+    ``where`` says where the item sits when it was not opened.
     """
     item.Save()
     opened = False
@@ -523,7 +526,7 @@ def _save_draft(item, kind: str, **extra) -> str:
         "entry_id": str(_safe_get(lambda: item.EntryID) or ""),
         "folder": folder,
         "opened_in_outlook": opened,
-        "note": ("Nothing has been sent. " + ("It is open in an Outlook window. " if opened else "It is in the Drafts folder, not opened. ")
+        "note": ("Nothing has been sent. " + ("It is open in an Outlook window. " if opened else f"It is {where}, not opened. ")
                  + "The user checks it in Outlook and presses Send."),
         **extra,
     }, indent=2, default=str)
@@ -2026,6 +2029,7 @@ async def create_event(
     body: str = "",
     all_day: bool = False,
     reminder_minutes: int = 15,
+    categories: str = "",
     account: str = "",
 ) -> str:
     """Create a personal appointment (no attendees) on the user's primary calendar (Outlook).
@@ -2041,27 +2045,27 @@ async def create_event(
             "2026-02-25".
         end: End time in ISO 8601 format. For all-day events, use the next
             day: "2026-02-26".
-        location: Optional. Event location (e.g. "Conference Room A",
-            "Microsoft Teams Meeting").
+        location: Optional. Event location text (e.g. "Conference Room A").
+            This server cannot create a Teams link; see draft_meeting.
         body: Optional. Description or notes for the event.
         all_day: If true, creates an all-day event. Default false.
         reminder_minutes: Minutes before the event to show a reminder.
             Default 15. Set to 0 to disable reminder.
+        categories: Optional. Colour category name(s) from list_categories for
+            this account, separated by semicolons (e.g. "Work" or
+            "Work; Travel"). Each account has its own list; a name not on it
+            is still applied but shows without a colour, and the result
+            lists it under unknown_categories.
         account: Optional. Account display name (or substring) to create
-            the event in. Default: primary account.
+            the event in. Default: the default account.
 
     Returns:
-        Confirmation with event subject and entry_id, or an error.
+        Confirmation with event subject, entry_id and categories, or an error.
     """
     def _create(outlook, namespace, subject, start, end, location, body,
-                all_day, reminder_minutes, account):
-        appt = outlook.CreateItem(OL_APPOINTMENT_ITEM)
-        # Move to correct store's calendar if account specified
-        if account:
-            store = _require_store(namespace, account)
-            cal = store.GetDefaultFolder(OL_FOLDER_CALENDAR)
-            appt.Move(cal)
-            appt = namespace.GetItemFromID(appt.EntryID)
+                all_day, reminder_minutes, categories, account):
+        store = _require_store(namespace, account)
+        appt = store.GetDefaultFolder(OL_FOLDER_CALENDAR).Items.Add(OL_APPOINTMENT_ITEM)
         appt.Subject = subject
         appt.Start = start
         appt.End = end
@@ -2075,19 +2079,29 @@ async def create_event(
             appt.ReminderMinutesBeforeStart = reminder_minutes
         else:
             appt.ReminderSet = False
+        unknown = []
+        if categories:
+            appt.Categories = categories
+            unknown = _unknown_categories(namespace, store, categories)
         appt.Save()
-        return json.dumps({
+        out = {
             "status": "created",
             "subject": appt.Subject,
             "start": str(appt.Start),
             "end": str(appt.End),
+            "calendar_account": str(store.DisplayName),
+            "categories": str(_safe_get(lambda: appt.Categories) or ""),
             "entry_id": appt.EntryID,
-        }, indent=2, default=str)
+        }
+        if unknown:
+            out["unknown_categories"] = unknown
+            out["note"] = "Those categories are not on this account's list, so they show without a colour."
+        return json.dumps(out, indent=2, default=str)
 
     try:
         return await bridge.call(
             _create, subject, start, end, location, body, all_day,
-            reminder_minutes, account,
+            reminder_minutes, categories, account,
         )
     except Exception as e:
         return f"Error creating event: {format_com_error(e)}"
@@ -2106,6 +2120,7 @@ async def draft_meeting(
     location: str = "",
     body: str = "",
     optional_attendees: str = "",
+    categories: str = "",
     account: str = "",
 ) -> str:
     """Prepare a meeting with attendees on the user's primary calendar (Outlook).
@@ -2124,6 +2139,12 @@ async def draft_meeting(
     Outlook window so it is not lost on the calendar (open_in_outlook setting
     "meetings"; "none" keeps it closed).
 
+    Teams: this server cannot add a Teams meeting link; Outlook's Teams add-in
+    creates those. If the user wants one, say that they click "Teams Meeting"
+    in the window that opens before pressing Send, or turn on Outlook's own
+    File > Options > Calendar > "Add online meeting to all meetings", which
+    then does it for every meeting they send.
+
     Args:
         subject: The meeting title.
         start: Start time in ISO 8601 format (e.g. "2026-02-25 14:00").
@@ -2134,6 +2155,10 @@ async def draft_meeting(
         body: Optional. Meeting description or agenda.
         optional_attendees: Optional. Optional attendee emails, separated
             by semicolons.
+        categories: Optional. Colour category name(s) from list_categories for
+            this account, separated by semicolons. A name not on the
+            account's list is applied without a colour and reported under
+            unknown_categories.
         account: Optional. Account display name (or substring) whose calendar
             the meeting goes on and which it will be sent from. Default: primary
             account. Use list_accounts to see available accounts.
@@ -2143,7 +2168,7 @@ async def draft_meeting(
         folder. Tell the user the invitation is waiting for them to send.
     """
     def _draft(outlook, namespace, subject, start, end, required_attendees,
-               location, body, optional_attendees, account):
+               location, body, optional_attendees, categories, account):
         store = _require_store(namespace, account)
         appt = store.GetDefaultFolder(OL_FOLDER_CALENDAR).Items.Add(OL_APPOINTMENT_ITEM)
         if account:
@@ -2171,16 +2196,24 @@ async def draft_meeting(
                     recip.Type = OL_OPTIONAL
 
         appt.Recipients.ResolveAll()
+        extra: dict = {}
+        if categories:
+            appt.Categories = categories
+            unknown = _unknown_categories(namespace, store, categories)
+            extra["categories"] = categories
+            if unknown:
+                extra["unknown_categories"] = unknown
         return _save_draft(
             appt, "meeting",
             start=str(appt.Start), end=str(appt.End),
             required_attendees=required_attendees, optional_attendees=optional_attendees,
+            **extra,
         )
 
     try:
         return await bridge.call(
             _draft, subject, start, end, required_attendees, location, body,
-            optional_attendees, account,
+            optional_attendees, categories, account,
         )
     except Exception as e:
         return f"Error preparing meeting: {format_com_error(e)}"
@@ -2198,12 +2231,13 @@ async def update_event(
     end: str = "",
     location: str = "",
     body: str = "",
+    categories: str = "",
     account: str = "",
 ) -> str:
     """Update an existing calendar event.
 
     Modifies properties of an appointment or meeting. Only the fields you
-    provide will be updated — omitted fields remain unchanged. The change is
+    provide will be updated; omitted fields remain unchanged. The change is
     saved, not sent: for a meeting the user organises, attendees are not
     notified until the user opens it in Outlook and presses Send Update.
 
@@ -2214,18 +2248,23 @@ async def update_event(
         end: Optional. New end time in ISO 8601 format.
         location: Optional. New location.
         body: Optional. New description/notes.
+        categories: Optional. Colour category name(s) from list_categories
+            for this account, separated by semicolons; replaces the event's
+            categories. "-" clears them. A name not on the account's list is
+            applied without a colour and reported under unknown_categories.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
 
     Returns:
         Confirmation with updated event details, or an error.
     """
-    def _update(outlook, namespace, entry_id, subject, start, end, location, body, account):
+    def _update(outlook, namespace, entry_id, subject, start, end, location, body, categories, account):
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
         else:
             item = namespace.GetItemFromID(entry_id)
+            store = _safe_get(lambda: item.Parent.Store) or _require_store(namespace, "")
         if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
             return err
         if subject:
@@ -2238,19 +2277,28 @@ async def update_event(
             item.Location = location
         if body:
             item.Body = body
+        unknown = []
+        if categories:
+            item.Categories = "" if categories.strip() == "-" else categories
+            unknown = _unknown_categories(namespace, store, item.Categories or "")
         item.Save()
-        return json.dumps({
+        out = {
             "status": "updated",
             "subject": item.Subject,
             "start": str(item.Start),
             "end": str(item.End),
             "location": item.Location or "",
+            "categories": str(_safe_get(lambda: item.Categories) or ""),
             "entry_id": item.EntryID,
-        }, indent=2, default=str)
+        }
+        if unknown:
+            out["unknown_categories"] = unknown
+            out["note"] = "Those categories are not on this account's list, so they show without a colour."
+        return json.dumps(out, indent=2, default=str)
 
     try:
         return await bridge.call(
-            _update, entry_id, subject, start, end, location, body, account,
+            _update, entry_id, subject, start, end, location, body, categories, account,
         )
     except Exception as e:
         return f"Error updating event: {format_com_error(e)}"
@@ -2306,6 +2354,211 @@ async def delete_event(entry_id: str, account: str = "") -> str:
 
 # (There is deliberately no respond_to_meeting: accepting or declining an
 #  invitation sends a message to the organiser, and this server never sends.)
+
+
+# =====================================================================
+# TOOL: draft_forward_event
+# =====================================================================
+
+def _add_recipients(item, addresses: str, kind: int) -> list[str]:
+    """Add each semicolon-separated address to ``item.Recipients`` as ``kind``
+    (required / optional attendee for an appointment)."""
+    added = []
+    for raw in (addresses or "").split(";"):
+        addr = raw.strip()
+        if addr:
+            recipient = item.Recipients.Add(addr)
+            recipient.Type = kind
+            added.append(addr)
+    return added
+
+
+@mcp.tool()
+async def draft_forward_event(
+    entry_id: str,
+    to: str,
+    body: str = "",
+    cc: str = "",
+    account: str = "",
+) -> str:
+    """Forward a calendar event to someone, without sending anything.
+
+    BEFORE CALLING THIS: show in the chat what will be forwarded (the event's
+    subject, time and location), to whom, and the note that goes with it, and
+    ask explicitly whether to put it in Outlook; call this tool only after the
+    user says yes.
+
+    What happens depends on the event, and the result says which:
+    - A meeting the user organises: the recipients are added as attendees and
+      the meeting is saved, with nothing sent. It opens in an Outlook window
+      (open_in_outlook setting "meetings") where the user presses Send
+      Update; Outlook offers to send it only to the added attendees. The note
+      is not written into the meeting, because an update goes to everyone.
+    - A meeting someone else organises, or a plain appointment: an email with
+      the event attached as an iCalendar (.ics) file, saved to Drafts with the
+      note above it. The recipient adds it to their calendar from the
+      attachment; their accept or decline does not reach the organiser.
+    Outlook's own Forward button on a received meeting (a real invitation the
+    recipient can accept) exists only in Outlook's window; automation cannot
+    produce it. Say so if the user wants that, and that it is one click there.
+
+    Args:
+        entry_id: EntryID of the event (from list_events, search_events or
+            get_event). For a recurring series this is the whole series.
+        to: Recipient email addresses, separated by semicolons.
+        body: Optional note to put above the .ics email. Ignored for a
+            meeting the user organises (see above).
+        cc: Optional. CC recipients, separated by semicolons (optional
+            attendees for a meeting the user organises).
+        account: Optional. Account display name (or substring). Only needed
+            if entry_id is ambiguous across stores.
+
+    Returns:
+        JSON with status "draft_saved", sent=false, forwarded_as
+        ("attendees_added" or "icalendar_attachment"), entry_id and folder of
+        the saved item, and the event's subject, start, end and location.
+        Tell the user where it is and what they press.
+    """
+    def _forward(outlook, namespace, entry_id, to, body, cc, account):
+        if account:
+            store = _require_store(namespace, account)
+            item = namespace.GetItemFromID(entry_id, store.StoreID)
+        else:
+            item = namespace.GetItemFromID(entry_id)
+        if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
+            return err
+        if not (to or "").strip():
+            return json.dumps({"error": "Give at least one recipient in 'to'."})
+        status = int(_safe_get(lambda: item.MeetingStatus, OL_NON_MEETING) or 0)
+        event = {
+            "event_subject": str(_safe_get(lambda: item.Subject) or ""),
+            "event_start": str(_safe_get(lambda: item.Start) or ""),
+            "event_end": str(_safe_get(lambda: item.End) or ""),
+            "event_location": str(_safe_get(lambda: item.Location) or ""),
+        }
+        if status == OL_MEETING:
+            # The user organises it, so "forward" means "invite them too". Outlook's object
+            # model has no Forward for appointments (only ForwardAsVcal), and adding the
+            # attendee is what Outlook itself does underneath; Send Update stays with the user.
+            added_to = _add_recipients(item, to, OL_REQUIRED)
+            added_cc = _add_recipients(item, cc, OL_OPTIONAL)
+            try:
+                item.Recipients.ResolveAll()
+            except Exception:
+                pass
+            return _save_draft(
+                item, "meeting", where="on the calendar with the new attendees not yet notified",
+                forwarded_as="attendees_added", to="; ".join(added_to), cc="; ".join(added_cc),
+                note_applied=False,
+                next_step="The user opens the meeting and presses Send Update; Outlook offers to send it "
+                          "only to the added attendees.",
+                **event,
+            )
+        mail = item.ForwardAsVcal()  # a MailItem with the event attached as .ics
+        mail.To = to
+        if cc:
+            mail.CC = cc
+        if body:
+            _write_draft_text(mail, body)
+        return _save_draft(mail, "forward_event", forwarded_as="icalendar_attachment",
+                           to=to, cc=cc, note_applied=bool(body), **event)
+
+    try:
+        return await bridge.call(_forward, entry_id, to, body, cc, account)
+    except Exception as e:
+        return f"Error forwarding event: {format_com_error(e)}"
+
+
+# =====================================================================
+# TOOL: move_event
+# =====================================================================
+
+@mcp.tool()
+async def move_event(
+    entry_id: str,
+    calendar: str,
+    account: str = "",
+    to_account: str = "",
+) -> str:
+    """Move a calendar item to another calendar: a secondary calendar in the
+    same mailbox (for example "Trips"), or a calendar in another account.
+    Nothing is sent.
+
+    For "put the whole trip on my other calendar": list the events first
+    (list_events or search_events over the trip's dates), show the user the
+    list and confirm it, then call this once per event. Each call returns the
+    item's new entry_id; the old one stops working.
+
+    Two things the user should know; say them when they apply:
+    - Classic Outlook fires reminders and reports free/busy only from the
+      main Calendar of a mailbox. Items on a secondary calendar show there but
+      do not pop reminders.
+    - A meeting moved to a different account becomes a plain copy there.
+      Updates or cancellations from its organiser keep going to the original
+      mailbox and do not follow the copy. Fine for flights and holds, not for
+      meetings someone else organises. Moving within one mailbox keeps
+      everything intact.
+
+    Args:
+        entry_id: EntryID of the event (from list_events, search_events or
+            get_event). For a recurring series this moves the whole series.
+        calendar: Destination calendar: a name or path from list_calendars
+            ("Trips", "Calendar/Trips"), or "" for the main Calendar.
+        account: Optional. Account the event is in now (display name or
+            substring). Only needed if entry_id is ambiguous across stores.
+        to_account: Optional. Account that holds the destination calendar.
+            Default: the account the event is in.
+
+    Returns:
+        JSON with status "moved" (or "unchanged" if it was already there),
+        the subject, from_calendar, to_calendar, to_account, the new entry_id
+        and a note with the caveats that apply.
+    """
+    def _move(outlook, namespace, entry_id, calendar, account, to_account):
+        if (calendar or "").strip().lower() in ("all", "*"):
+            return json.dumps({"error": "calendar must name one destination calendar, not \"all\"."})
+        if account:
+            store = _require_store(namespace, account)
+            item = namespace.GetItemFromID(entry_id, store.StoreID)
+        else:
+            item = namespace.GetItemFromID(entry_id)
+            store = _safe_get(lambda: item.Parent.Store) or _require_store(namespace, "")
+        if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
+            return err
+        dest_store = _require_store(namespace, to_account) if to_account else store
+        label, dest = resolve_calendars(dest_store, calendar)[0]
+        subject = str(_safe_get(lambda: item.Subject) or "")
+        from_path = folder_path(item)
+        if str(_safe_get(lambda: item.Parent.EntryID) or "") == str(dest.EntryID):
+            return json.dumps({"status": "unchanged", "subject": subject, "entry_id": str(item.EntryID),
+                               "note": f"Already on {label}."}, indent=2, default=str)
+        cross_account = str(dest_store.StoreID) != str(store.StoreID)
+        is_meeting = int(_safe_get(lambda: item.MeetingStatus, OL_NON_MEETING) or 0) != OL_NON_MEETING
+        try:
+            dest_is_main = str(dest.EntryID) == str(dest_store.GetDefaultFolder(OL_FOLDER_CALENDAR).EntryID)
+        except Exception:
+            dest_is_main = False
+        moved = item.Move(dest)
+        note = "Nothing was sent."
+        if not dest_is_main:
+            note += " Items on a secondary calendar do not pop reminders in classic Outlook."
+        if cross_account and is_meeting:
+            note += (" This meeting is now a plain copy in the other account; updates or cancellations "
+                     "from its organiser will not reach it.")
+        return json.dumps({
+            "status": "moved",
+            "subject": subject,
+            "from_calendar": from_path,
+            "to_calendar": label,
+            "to_account": str(dest_store.DisplayName),
+            "entry_id": str(_safe_get(lambda: moved.EntryID) or ""),
+            "note": note,
+        }, indent=2, default=str)
+
+    try:
+        return await bridge.call(_move, entry_id, calendar, account, to_account)
+    except Exception as e:
+        return f"Error moving event: {format_com_error(e)}"
 
 
 # =====================================================================
@@ -2671,27 +2924,63 @@ async def save_attachment(
 # CATEGORY TOOLS
 # =====================================================================
 
+_CATEGORY_COLORS = {
+    0: "none", 1: "red", 2: "orange", 3: "peach", 4: "yellow", 5: "green", 6: "teal", 7: "olive",
+    8: "blue", 9: "purple", 10: "maroon", 11: "steel", 12: "dark steel", 13: "gray", 14: "dark gray",
+    15: "black", 16: "dark red", 17: "dark orange", 18: "dark peach", 19: "dark yellow", 20: "dark green",
+    21: "dark teal", 22: "dark olive", 23: "dark blue", 24: "dark purple", 25: "dark maroon",
+}
+
+
+def _store_categories(namespace, store) -> list[dict]:
+    """The colour categories of one mailbox. Each Exchange account keeps its own master list
+    (``Store.Categories``); the profile-wide list is the fallback for stores without one."""
+    cats = _safe_get(lambda: store.Categories) if store is not None else None
+    if cats is None:
+        cats = namespace.Categories
+    out = []
+    for i in range(int(_safe_get(lambda: cats.Count, 0) or 0)):
+        try:
+            cat = cats.Item(i + 1)
+            color = int(_safe_get(lambda: cat.Color, 0) or 0)
+            out.append({"name": str(cat.Name), "color": color, "color_name": _CATEGORY_COLORS.get(color, str(color))})
+        except Exception:
+            continue
+    return out
+
+
+def _split_categories(text: str) -> list[str]:
+    return [c.strip() for c in re.split(r"[;,]", text or "") if c.strip()]
+
+
+def _unknown_categories(namespace, store, text: str) -> list[str]:
+    """Names in ``text`` that are not on the store's category list (they still apply, uncoloured)."""
+    known = {c["name"].lower() for c in _store_categories(namespace, store)}
+    return [c for c in _split_categories(text) if c.lower() not in known]
+
+
 @mcp.tool()
 async def list_categories(account: str = "") -> str:
-    """List all available Outlook categories.
+    """List the colour categories of one account.
 
-    Returns the color categories configured in the user's Outlook profile.
-    These can be applied to emails, events, tasks, and other items.
+    Each account (mailbox) keeps its own list, so "Work" may exist in one and
+    not another; ask for the account the item lives in. The names are what
+    set_category, create_event, draft_meeting and update_event accept.
 
     Args:
-        account: Optional. Account display name (or substring) to target.
-            Default: primary account. Use list_accounts to see available accounts.
+        account: Optional. Account display name (or substring). Default: the
+            default account. Use list_accounts to see available accounts.
 
     Returns:
-        JSON array of category objects with name and color index.
+        JSON with the account and its categories [{name, color, color_name}].
     """
     def _list(outlook, namespace, account):
-        # Categories are profile-wide, not per-store, but we accept the param for consistency
-        results = []
-        for i in range(namespace.Categories.Count):
-            cat = namespace.Categories.Item(i + 1)
-            results.append({"name": cat.Name, "color": cat.Color})
-        return json.dumps(results, indent=2, default=str)
+        store = _require_store(namespace, account)
+        return json.dumps({
+            "account": str(store.DisplayName),
+            "categories": _store_categories(namespace, store),
+            "note": "Categories are per account; other accounts may have different ones.",
+        }, indent=2, default=str)
 
     try:
         return await bridge.call(_list, account)
@@ -2705,21 +2994,24 @@ async def set_category(
     categories: str,
     account: str = "",
 ) -> str:
-    """Set categories on an email, event, or task.
+    """Set the colour categories on an email, event or task.
 
-    Replaces any existing categories on the item. Use comma-separated
-    values for multiple categories.
+    Replaces any existing categories on the item. Use the names from
+    list_categories for the account the item lives in; each account has its
+    own list. A name not on that list is still applied but shows without a
+    colour, and the result lists it under unknown_categories.
 
     Args:
         entry_id: The EntryID of the item to categorize.
-        categories: Category name(s), comma-separated. Example:
-            "Important" or "Work, Follow-up". Use an empty string to
+        categories: Category name(s), separated by semicolons or commas.
+            Example: "Work" or "Work; Follow-up". Use an empty string to
             clear all categories.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
 
     Returns:
-        Confirmation with the item subject and applied categories.
+        JSON with the item's subject, the categories now on it, and
+        unknown_categories when some were not on the account's list.
     """
     def _set(outlook, namespace, entry_id, categories, account):
         if account:
@@ -2727,12 +3019,17 @@ async def set_category(
             item = namespace.GetItemFromID(entry_id, store.StoreID)
         else:
             item = namespace.GetItemFromID(entry_id)
+            store = _safe_get(lambda: item.Parent.Store) or _require_store(namespace, "")
         item.Categories = categories
         item.Save()
-        return (
-            f"Categories set on '{item.Subject}': "
-            f"'{item.Categories or '(none)'}'"
-        )
+        now = str(_safe_get(lambda: item.Categories) or "")
+        out = {"status": "categories_set", "subject": str(_safe_get(lambda: item.Subject) or ""),
+               "categories": now, "account": str(store.DisplayName)}
+        unknown = _unknown_categories(namespace, store, now)
+        if unknown:
+            out["unknown_categories"] = unknown
+            out["note"] = "Those categories are not on this account's list, so they show without a colour."
+        return json.dumps(out, indent=2, default=str)
 
     try:
         return await bridge.call(_set, entry_id, categories, account)

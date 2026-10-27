@@ -3,6 +3,35 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## 0.9.0 - 2026-10-27
+
+### Added
+- **`draft_forward_event`**: forward a calendar event without sending. For a meeting the user
+  organises, the recipients are added as attendees and the meeting is saved for the user to
+  press Send Update (Outlook offers to send it only to them). For a received meeting or a
+  plain appointment, an email with the event attached as .ics, saved to Drafts. Outlook's
+  automation has no true "forward invitation" for appointments; the result says which form
+  was used.
+- **`move_event`**: move an event to another calendar in the same mailbox or in another
+  account, one call per event. The result says when the destination will not pop reminders
+  (secondary calendars) and when a meeting moved across accounts has become a plain copy that
+  the organiser's updates will not reach.
+- **Categories per account.** `list_categories` now reads the chosen account's own list (each
+  mailbox keeps one; the old code read the profile-wide list whatever account was asked for)
+  and names each colour. `create_event`, `draft_meeting` and `update_event` take
+  `categories`; `set_category` and all three report `unknown_categories` when a name is not on
+  that account's list (Outlook applies it uncoloured). Event and email summaries carry
+  `categories`.
+
+### Fixed
+- `create_event` without an account went to Outlook's own default mailbox, ignoring the
+  `default_account` setting. It now uses the default account like every other tool.
+
+### Changed
+- `create_event` and `draft_meeting` say plainly that the server cannot add a Teams link and
+  how the user adds one (the Teams Meeting button in the window that opens, or Outlook's "Add
+  online meeting to all meetings" option). README and CLAUDE.md say the same.
+
 ## 0.8.2 - 2026-10-27
 
 ### Fixed

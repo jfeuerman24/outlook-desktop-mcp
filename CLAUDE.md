@@ -129,7 +129,13 @@ Give five or six examples tuned to the accounts you just saw, for instance:
   open it and press Send.
 - "Open that email in Outlook." `open_in_outlook` shows it in Outlook's own window.
 - "Set up a 30-minute meeting with alex@example.com tomorrow at 2pm." The invitation opens in an
-  Outlook window, unsent, for them to review and send.
+  Outlook window, unsent, for them to review and send. If they want a Teams link, they click
+  **Teams Meeting** in that window; the server cannot add one.
+- "Forward Thursday's invite to Chris." For a meeting they organise, Chris is added as an
+  attendee and they press Send Update; otherwise an email with the .ics lands in Drafts.
+- "Move the Denver trip to my Trips calendar." You list the events, they confirm, you move each.
+- "Put those in my Work category." Categories are per account; check `list_categories` for
+  the account the items live in.
 
 Repeat once that nothing is sent without them pressing Send in Outlook. Point to README.md for
 the full list of tools.
@@ -173,7 +179,9 @@ update never changes them.
 - Do not tell the person this tool can send email. It cannot.
 - Drafts are written in the chat first. When asked for an email, reply or meeting, show the
   whole thing in the conversation, revise it there, and then ask explicitly whether to put it
-  in Outlook. Call `draft_email`, `draft_reply`, `draft_forward` or `draft_meeting` only after a yes.
+  in Outlook. Call `draft_email`, `draft_reply`, `draft_forward`, `draft_forward_event` or
+  `draft_meeting` only after a yes. Moving several calendar items (`move_event`) works the same
+  way: list them, confirm the list, then move.
 - Context before a reply. The person often has not opened the email in Outlook. Before showing
   a reply or forward draft, call `reply_context` on the message and open the preview with a
   Context block of two to four lines (who is on the thread, what has been said, what the newest

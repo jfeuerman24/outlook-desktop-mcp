@@ -103,7 +103,7 @@ restart Claude, and delete the folder.
 
 | Change | Where |
 |---|---|
-| **Never sends.** Upstream's `send_email`, `reply_email` and `create_meeting` are replaced by `draft_email`, `draft_reply`, `draft_forward` and `draft_meeting`, which save the item for you to send. `respond_to_meeting` is gone and `delete_event` refuses meetings you organised, because both would send a message. | `server.py` |
+| **Never sends.** Upstream's `send_email`, `reply_email` and `create_meeting` are replaced by `draft_email`, `draft_reply`, `draft_forward`, `draft_forward_event` and `draft_meeting`, which save the item for you to send. `respond_to_meeting` is gone and `delete_event` refuses meetings you organised, because both would send a message. | `server.py` |
 | **Windows only.** The macOS/AppleScript server was removed. | `entrypoint.py` |
 | **Claude installs and explains it.** `CLAUDE.md` is the guide Claude follows; `install.ps1` / `install.cmd` do the install and register the server with the desktop app, including the Microsoft Store build. | `CLAUDE.md`, `install.ps1`, `scripts/` |
 | **Drafts are written in the chat first.** The draft tools tell Claude to show the full draft and ask before putting it in Outlook; drafts are single-spaced in Aptos 12 pt with your signature. Email drafts are saved quietly to Drafts; unsent meetings open in an Outlook window (the `open_in_outlook` setting). | `server.py`, `utils/html.py` |
@@ -112,7 +112,7 @@ restart Claude, and delete the folder.
 | **Attachments read in place, files attached from disk.** `read_attachment` (PDF, Word, Excel, PowerPoint, CSV, text, .msg), `add_attachment`, and an `attachments` argument on every draft tool. | `utils/extract.py`, `server.py` |
 | **Fast searches.** Outlook does the filtering (subject, sender, recipient, date) instead of Python walking messages, so a sender search of an 11,000-message inbox takes a second and sees every message, and "my history with company X" is one `search_emails` call across the Inbox tree, Sent Items and Archive. `contact_history` sees mail where the person was only copied. Shared mailboxes that are not cached locally are skipped by `account="all"`. Long searches return partial results before the time limit instead of an error; every result says how long it took. `legacy_mode` runs the old paths. | `utils/dasl.py`, `utils/deadline.py`, `com_bridge.py`, `server.py` |
 | **One-call lookups.** `contact_history` (one person across every account and calendar), `account="all"` on `list_emails`/`search_emails`, `update_draft`, `health_check`. | `server.py` |
-| **Every calendar, not just the default.** `list_calendars`; `list_events` and `search_events` take `calendar` (`""`, `"all"`, or a name/path). | `tools/calendars.py` |
+| **Every calendar, not just the default.** `list_calendars`; `list_events` and `search_events` take `calendar` (`""`, `"all"`, or a name/path); `move_event` moves an item between calendars or accounts. | `tools/calendars.py`, `server.py` |
 | **Thread reconstruction.** `get_conversation` walks Outlook's conversation across folders and dates, deduped by Message-ID, oldest first. | `tools/conversation.py` |
 | **Quoted history trimmed, Exchange addresses resolved, ISO dates.** `read_email` returns the message's own text; senders inside your own organisation come back as real addresses; dates carry the local UTC offset. | `utils/text.py`, `utils/addresses.py`, `utils/dates.py` |
 | **Offline unit tests** (`python -m unittest discover -s tests`) and a GitHub Actions workflow that runs them on every push. Publishing to PyPI is manual-only and unused; `main` is what people install and update from. | `tests/test_*.py`, `.github/workflows/` |
@@ -174,9 +174,11 @@ You have three options:
 | `list_events` | List events within a date range, from one calendar or `calendar="all"` |
 | `get_event` | Read full event details by entry ID |
 | `search_events` | Search calendar events by keyword within a date range |
-| `create_event` | Create a personal calendar appointment (no attendees) |
-| `draft_meeting` | Put a meeting with attendees on the calendar; it opens in Outlook for you to check. **Invitations not sent.** |
-| `update_event` | Change an event's subject, time, location, etc. Saved, not sent |
+| `create_event` | Create a personal calendar appointment (no attendees), with optional colour categories |
+| `draft_meeting` | Put a meeting with attendees on the calendar, with optional colour categories; it opens in Outlook for you to check. **Invitations not sent.** |
+| `draft_forward_event` | Forward an event: for a meeting you organise, the person is added as an attendee and you press Send Update; for anything else, an email with the event attached as .ics, saved to Drafts. **Not sent.** |
+| `move_event` | Move an event to another calendar in the same mailbox or in another account; one call per event, so "put the whole trip on my Trips calendar" is a list, a confirmation, then the moves |
+| `update_event` | Change an event's subject, time, location, categories, etc. Saved, not sent |
 | `delete_event` | Delete an appointment or a received meeting. Refuses meetings you organised |
 
 ### Tasks
@@ -203,8 +205,8 @@ You have three options:
 
 | Tool | Description |
 |------|-------------|
-| `list_categories` | List all available color categories in Outlook |
-| `set_category` | Set or clear categories on any email, event, or task |
+| `list_categories` | List one account's colour categories with their colours. Each account keeps its own list |
+| `set_category` | Set or clear categories on any email, event or task; names not on the account's list are applied uncoloured and reported |
 | `list_rules` | List all mail rules with enabled/disabled status |
 | `toggle_rule` | Enable or disable a mail rule by name |
 | `get_out_of_office` | Check whether Out of Office auto-reply is on or off |
@@ -217,16 +219,21 @@ You have three options:
 | `set_setting` | Change a setting by asking Claude (default account, hidden accounts, draft window, font); takes effect at once |
 | `health_check` | Server version, Outlook running, accounts loaded, settings, and whether Outlook's permission prompt is blocking |
 
-**Total: 41 tools.**
+**Total: 43 tools.**
 
 ### Nothing sends
 
-The four tools that would normally send instead save and hand over to you:
+The five tools that would normally send instead save and hand over to you:
 
 - `draft_email` writes a new message to the Drafts folder of the chosen account.
 - `draft_reply` builds Outlook's own reply or reply-all (recipients, quoted thread, signature) and puts the text above it.
 - `draft_forward` builds Outlook's own forward (FW: subject, header block, quoted message, attachments) and puts your note above it.
+- `draft_forward_event` adds the person to a meeting you organise (you press Send Update), or forwards any other event as an email with the .ics attached, to Drafts. Outlook's own Forward button on a received meeting, which sends a real invitation, exists only in Outlook's window.
 - `draft_meeting` puts the meeting on your calendar with the attendees filled in and the invitations unsent.
+
+Teams links are the one thing a meeting draft cannot carry: Outlook's Teams add-in creates
+them. Click **Teams Meeting** in the window that opens before you press Send, or turn on
+Outlook's **File → Options → Calendar → Add online meeting to all meetings** once.
 
 Each one saves the item so you can open it, read it and press **Send**. By default an unsent
 meeting opens in an Outlook window at once, so it is not lost on the calendar, and an email draft
@@ -405,6 +412,9 @@ Once registered, just talk to Claude naturally:
 - *"Is the Outlook connector working?"* — `health_check`
 - *"Draft an email to alice@example.com about the project update"*
 - *"Set up a 30-minute meeting with bob@example.com tomorrow at 2pm"* — the invitation is on your calendar, unsent; you press Send
+- *"Forward Thursday's board meeting invite to Chris"* — a real invitation, saved to Drafts for you to send
+- *"Move all the Denver trip events to my Trips calendar"* — Claude lists them, you confirm, each one is moved
+- *"Put those in my Work category"* — categories are per account; Claude uses the right account's list
 - *"Create a task to review the quarterly report, due Friday, high importance"*
 - *"Mark that email as read and move it to archive"*
 - *"What categories do I have? Set this email to 'Follow-up'"*
@@ -428,7 +438,7 @@ Once registered, just talk to Claude naturally:
 outlook-desktop-mcp/
   src/outlook_desktop_mcp/
     entrypoint.py            # Windows check → server
-    server.py                # The MCP server (41 tools, COM automation, drafts only)
+    server.py                # The MCP server (43 tools, COM automation, drafts only)
     com_bridge.py            # Async-to-COM threading bridge
     tools/
       _folder_constants.py   # Outlook enums and constants
