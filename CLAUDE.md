@@ -95,6 +95,13 @@ the default and set it with `set_setting("default_account", "<name>")`; it appli
 to hide mailboxes they never use (`set_setting("hide_accounts", "...")`) so "all accounts"
 searches skip them. Explain that settings can be changed any time by asking.
 
+Accounts flagged `shared_uncached: true` are shared mailboxes Outlook keeps no local copy of.
+Searching one means a server round trip per folder, so "all accounts" searches skip them on
+their own (they can still be named). Say so in one sentence and, if the person never uses one,
+offer to hide it as above. If they do need it in every search,
+`set_setting("include_shared_in_all", "true")` turns that back on, at a cost of tens of seconds
+per search.
+
 ### Stage 6: Show what it can do
 
 Give five or six examples tuned to the accounts you just saw, for instance:
@@ -120,6 +127,7 @@ the full list of tools.
 | After the restart, no Outlook tools in your tool list | Run `.venv\Scripts\python.exe scripts\configure_claude_desktop.py --show` and check the entry and that the exe exists. Ask the person to check **Settings → Developer**: the server should be listed with a status; **Open Logs Folder** has `mcp-server-outlook-desktop.log`. Most often Claude was not fully quit, or Outlook was not running when Claude started. |
 | `install.ps1` says it cannot find Claude's settings folder, or Claude does not pick up the server after a restart | Ask the person to click their initials (bottom-left) → **Settings** → **Developer** → **Edit Config**. A File Explorer window opens on `claude_desktop_config.json`; ask them to click the address bar and paste you the path. Then run `.venv\Scripts\python.exe scripts\configure_claude_desktop.py --config "<that path>\claude_desktop_config.json"` and have them restart Claude. |
 | Tools exist but every call errors | Outlook is not running, the New Outlook switch is on, or Outlook's permission prompt is waiting behind another window. |
+| Searches are slow, or a result says `"partial": true` | Call `health_check`: accounts marked `shared_uncached` are skipped by all-account searches (hide them if unused), and the `body_search_index` line says whether body-text search has to scan every message (if so, prefer sender and subject searches and add a date range). A partial result hit the time limit: narrow the request rather than repeat it, or raise `call_timeout_s`. If a search looks wrong rather than slow, `set_setting("legacy_mode", "true")` runs the pre-0.6 code at once; say what happened so it can be fixed. |
 | `install.ps1` cannot download packages | No internet, or a corporate proxy. Retry; otherwise `SETUP.md` has the ARM64 and proxy notes. |
 | Person wants it gone | `.venv\Scripts\python.exe scripts\configure_claude_desktop.py --remove`, then they restart Claude. Deleting the folder removes the rest. |
 

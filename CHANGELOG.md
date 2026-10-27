@@ -3,12 +3,52 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
-## Unreleased
+## 0.6.0 - 2026-10-27
+
+Searching is now fast. Measured on a profile with five accounts, one of them an 11,000-message
+inbox: the nine calls behind two real sessions took 250 s with three timeouts before, 26 s
+with none after.
+
+### Changed
+- **Outlook filters, Python no longer walks.** The `sender` filter on `list_emails` and
+  `search_emails` is a native filter on the sender's name, directory address and SMTP
+  address (1 s on 11,000 messages, and complete: the old scan only looked at the newest
+  1,000 messages per folder and silently missed older mail from that sender).
+- **`search_emails` matches subjects by default.** `include_body=true` also scans message
+  text, which opens every message and is slow on big folders; use it last and with a date
+  range. Where Windows Search has indexed Outlook bodies, the server detects it once per
+  session and body search is fast too (`health_check` reports which).
+- **`contact_history`** skips plain appointments before reading anything, reads three
+  fields per meeting instead of formatting every occurrence, lets Outlook match recipients
+  by the names the person is known by (found from the received side, so an address or
+  domain works too), skips Birthdays and holiday calendars, and caches each account's
+  calendar list for ten minutes.
+- **Shared mailboxes that are not cached locally are skipped by `account="all"`** and
+  listed under `accounts_skipped`; every folder listing in such a mailbox is a server round
+  trip (18 to 30 s just to find its calendars). Name the mailbox to search it, or set
+  `include_shared_in_all`. `list_accounts` and `health_check` flag them.
+- **Time limits return results instead of errors.** Long searches stop a few seconds
+  before the limit (`call_timeout_s`, default 60) and return what they found with
+  `"partial": true`. A call queued behind an overrunning call fails at once with a clear
+  message instead of also timing out; a queued call whose caller has given up is skipped.
+- Tool descriptions and the server instructions steer Claude to sender and subject
+  searches in the default account first, and to `contact_history` only for one known
+  person.
+- Draft tool descriptions no longer claim drafts open in a window by default (they have
+  not since 0.5.0).
+
+### Added
+- Settings `include_shared_in_all`, `call_timeout_s` and `legacy_mode`. Legacy mode runs
+  the pre-0.6 search paths unchanged, as a runtime fallback; it needs no restart.
+- `tests/perf_check.py`: read-only timing of the searches above, for before/after numbers.
+- Unit tests for the filter builders, deadlines, the bridge's request bookkeeping and the
+  calendar cache.
 
 ### Fixed
 - `read_attachment` on an Excel file left the workbook open when the requested sheet did
   not exist (or reading raised), so on Windows the temporary copy could not be deleted. The
   workbook is now closed on every path. This is what failed the unit tests in CI for 0.5.0.
+- Package metadata pointed at the upstream repository.
 
 ## 0.5.0 - 2026-10-27
 

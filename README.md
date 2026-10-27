@@ -66,6 +66,7 @@ restart Claude, and delete the folder.
 | **Drafts are written in the chat first.** The draft tools tell Claude to show the full draft and ask before putting it in Outlook; drafts are single-spaced in Aptos 12 pt with your signature, and saved quietly to Drafts unless you turn the window on. | `server.py`, `utils/html.py` |
 | **Settings by conversation.** `set_setting` / `get_settings` for the default account, hidden accounts, draft window and font, stored outside the repo. | `utils/settings.py` |
 | **Attachments read in place, files attached from disk.** `read_attachment` (PDF, Word, Excel, PowerPoint, CSV, text, .msg), `add_attachment`, and an `attachments` argument on every draft tool. | `utils/extract.py`, `server.py` |
+| **Fast searches.** Outlook does the filtering (sender, recipient, subject, date) instead of Python walking messages, so a sender search of an 11,000-message inbox takes a second and sees every message. Shared mailboxes that are not cached locally are skipped by `account="all"`. Long searches return partial results before the time limit instead of an error. `legacy_mode` runs the old paths. | `utils/dasl.py`, `utils/deadline.py`, `com_bridge.py`, `server.py` |
 | **One-call lookups.** `contact_history` (one person across every account and calendar), `account="all"` on `list_emails`/`search_emails`, `update_draft`, `health_check`. | `server.py` |
 | **Every calendar, not just the default.** `list_calendars`; `list_events` and `search_events` take `calendar` (`""`, `"all"`, or a name/path). | `tools/calendars.py` |
 | **Thread reconstruction.** `get_conversation` walks Outlook's conversation across folders and dates, deduped by Message-ID, oldest first. | `tools/conversation.py` |
@@ -107,9 +108,9 @@ You have three options:
 |------|-------------|
 | `list_emails` | List recent emails from any folder, with optional unread, date, sender and subfolder filters; `account="all"` for every mailbox |
 | `read_email` | Read full email content by entry ID or subject search (quoted history trimmed unless `include_history`) |
-| `search_emails` | Full-text search across email subjects and bodies, optionally by sender, across subfolders, and with `account="all"` across every mailbox |
+| `search_emails` | Find mail by sender (name, address or domain), subject text and date, in about a second even in a big folder; `include_body` also scans message text (slow); `account="all"` for every mailbox |
 | `get_conversation` | Every message of a thread, oldest first, each once, across folders and dates; `max_body_chars` for a cheap look at long threads |
-| `contact_history` | One person across every account: last received, last sent, recent messages both ways, last and next meeting |
+| `contact_history` | One known person across every account: last received, last sent, recent messages both ways, last and next meeting. The broadest search; use after a targeted one |
 | `list_folders` | Browse the folder hierarchy with item counts |
 | `draft_email` | Write a new email to Drafts with To/CC/BCC and optional file attachments. **Not sent.** |
 | `draft_reply` | Write a reply or reply-all above the quoted thread, save to Drafts, optional attachments. **Not sent.** |
@@ -146,7 +147,7 @@ You have three options:
 
 | Tool | Description |
 |------|-------------|
-| `list_accounts` | List the mailboxes in the Outlook profile (hidden ones left out unless asked) |
+| `list_accounts` | List the mailboxes in the Outlook profile (hidden ones left out unless asked); flags shared mailboxes that all-account searches skip |
 | `list_attachments` | List all attachments on an email or calendar event |
 | `save_attachment` | Save an attachment to a local directory (writes to disk, never to the mailbox) |
 | `read_attachment` | Read the text of a PDF, Word, Excel, PowerPoint, CSV, text or .msg attachment without saving it |
@@ -189,6 +190,26 @@ Drafts get your normal signature and the font described below.
 Deliberately missing: there is no tool to send, to accept or decline an invitation, or to
 cancel a meeting you organised, because every one of those sends a message. Do those in Outlook.
 
+### Searching quickly
+
+Outlook filters by sender, recipient, subject and date itself, in well under a second even in
+a folder of 10,000 messages, so `search_emails` with a `sender` (name, address or domain) or a
+subject word is the fast way to find a thread, and Claude is told to start there. Three things
+are slower and are handled explicitly:
+
+- **Body text.** `include_body=true` opens every message in the folder, 10 to 30 seconds on a
+  big one. On a PC where Windows Search has indexed Outlook's message bodies the server detects
+  that once per session and uses the index instead; `health_check` says which applies.
+- **Shared mailboxes that are not cached locally.** Every folder listing in one is a server
+  round trip (18 to 30 seconds just to find its calendars). `account="all"` skips them and lists
+  them under `accounts_skipped`; name the mailbox to search it, or set `include_shared_in_all`.
+- **Time limits.** A search that cannot finish within `call_timeout_s` (default 60) stops a few
+  seconds early and returns what it found with `"partial": true` and a note, rather than an
+  error. A call made while an earlier one has overrun fails at once with "Outlook is busy".
+
+If a new search path misbehaves, `set_setting("legacy_mode", "true")` runs the pre-0.6 code
+immediately, no restart. `tests/perf_check.py` times the searches that used to be slow (read-only).
+
 ### Working with several calendars
 
 ```
@@ -217,6 +238,9 @@ Claude's config, which then overrides the file.
 | `open_drafts` | `OUTLOOK_MCP_OPEN_DRAFTS` | off | Open each new draft in an Outlook window instead of only saving it. A single call can still say `open_in_outlook=true/false` |
 | `font_family`, `font_size_pt`, `font_color` | `OUTLOOK_MCP_FONT_*` | Aptos, 12, black | Font for the text the server writes into drafts |
 | `plain_text` | `OUTLOOK_MCP_PLAIN_TEXT` | off | Write drafts as plain text instead of styled HTML |
+| `include_shared_in_all` | `OUTLOOK_MCP_INCLUDE_SHARED_IN_ALL` | off | Include shared, non-cached mailboxes in `account="all"` searches (slow) |
+| `call_timeout_s` | `OUTLOOK_MCP_CALL_TIMEOUT_S` | 60 | Seconds a tool call may take; long searches return partial results just before it |
+| `legacy_mode` | `OUTLOOK_MCP_LEGACY_MODE` | off | Run the pre-0.6 search paths (slow); for troubleshooting |
 
 ### Reading attachments
 
@@ -231,9 +255,10 @@ as such; old `.doc`/`.xls`/`.ppt` files are not supported.
 ### Checking that it works
 
 `health_check` reports the server version, whether Outlook is reachable, which accounts are
-loaded and which is the default, the current settings, and whether Outlook is blocking address
-access behind its permission prompt. It is the first thing to run when something fails,
-particularly from a phone where the laptop screen cannot be seen.
+loaded and which is the default, which are shared mailboxes skipped by all-account searches,
+whether body-text search can use the Windows Search index, the current settings, and whether
+Outlook is blocking address access behind its permission prompt. It is the first thing to run
+when something fails, particularly from a phone where the laptop screen cannot be seen.
 
 ## How it works
 
@@ -349,6 +374,8 @@ outlook-desktop-mcp/
       html.py                # Draft font styling, note markers, injecting text above signature/quoted history (pure)
       settings.py            # Settings file + env var resolution (pure)
       extract.py             # Text out of PDF/Word/Excel/PowerPoint/CSV attachments (pure)
+      dasl.py                # Outlook Restrict filter builders: sender, recipient, subject, body, dates (pure)
+      deadline.py            # Soft deadlines so long searches return partial results in time (pure)
       errors.py              # COM error formatting
   tests/
     test_text.py             # unit: trimming (no Outlook)
@@ -356,7 +383,11 @@ outlook-desktop-mcp/
     test_html.py             # unit: draft HTML (no Outlook)
     test_settings.py         # unit: settings resolution (no Outlook)
     test_extract.py          # unit: attachment text extraction (no Outlook)
+    test_dasl.py             # unit: filter builders (no Outlook)
+    test_deadline.py         # unit: deadlines and bridge request bookkeeping (no Outlook)
+    test_calendars.py        # unit: calendar discovery cache with a fake store (no Outlook)
     live_check.py            # live: the fork's additions over stdio, reads only, changes nothing
+    perf_check.py            # live: times the searches that used to be slow, reads only
     phase1_com_test.py       # Email COM validation (writes a draft, sends nothing)
     phase3_mcp_test.py       # Email MCP test (writes a draft, sends nothing)
     calendar_com_test.py     # Calendar COM validation (prepares an unsent meeting)
