@@ -151,8 +151,8 @@ The three tools that would normally send instead save and hand over to you:
 - `draft_reply` builds Outlook's own reply or reply-all (recipients, quoted thread, signature) and puts the text above it.
 - `draft_meeting` puts the meeting on your calendar with the attendees filled in and the invitations unsent.
 
-Each one saves the item and, unless called with `open_in_outlook=false`, opens it in an Outlook
-window so you can read it and press **Send**. The tool result says `"status": "draft_saved"`
+Each one saves the item so you can open it, read it and press **Send**; with
+`OUTLOOK_MCP_OPEN_DRAFTS=1` (or `open_in_outlook=true` on a call) it opens in an Outlook window at once. The tool result says `"status": "draft_saved"`
 and `"sent": false`, with the entry ID and the folder, so Claude can tell you where it is.
 Drafts get your normal signature and the font described below.
 
@@ -172,7 +172,14 @@ list_events start_date="2026-10-27" end_date="2026-10-29" calendar="all" account
 To check availability across accounts, call `list_events` with `calendar="all"` once per account and
 compare the results.
 
-### Draft font
+### Draft settings
+
+By default a new draft is saved to Drafts (or, for a meeting, onto the calendar) without
+opening a window; Claude tells you where it is. Set `OUTLOOK_MCP_OPEN_DRAFTS=1` before the
+server starts to have every draft pop open in Outlook instead. Either way, a single call can
+say `open_in_outlook=true` or `false` to override.
+
+#### Font
 
 Drafts are written as HTML in Aptos 12 pt black so they look the same everywhere. Override with
 environment variables before the server starts: `OUTLOOK_MCP_FONT_FAMILY`, `OUTLOOK_MCP_FONT_SIZE_PT`,
@@ -247,9 +254,9 @@ Once registered, just talk to Claude naturally:
 - *"Read the email from Taylor about MLADS and give me the whole thread"*
 - *"What's on all my calendars this week?"*
 - *"Save the attachment from that email to my Downloads folder"*
-- *"Draft a reply to Taylor saying I can do Thursday"* — the reply opens in Outlook; you press Send
+- *"Draft a reply to Taylor saying I can do Thursday"* — the reply is saved to Drafts; you press Send
 - *"Draft an email to alice@example.com about the project update"*
-- *"Set up a 30-minute meeting with bob@example.com tomorrow at 2pm"* — the invitation opens in Outlook; you press Send
+- *"Set up a 30-minute meeting with bob@example.com tomorrow at 2pm"* — the invitation is on your calendar, unsent; you press Send
 - *"Create a task to review the quarterly report, due Friday, high importance"*
 - *"Mark that email as read and move it to archive"*
 - *"What categories do I have? Set this email to 'Follow-up'"*

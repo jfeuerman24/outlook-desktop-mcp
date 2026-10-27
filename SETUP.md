@@ -180,7 +180,13 @@ changes nothing. Run it from the folder you installed into:
 .\.venv\Scripts\python.exe tests\live_check.py
 ```
 
-## Draft font
+## Draft settings
+
+New drafts are saved to Drafts without opening a window. To have them pop open in Outlook,
+add `"env": { "OUTLOOK_MCP_OPEN_DRAFTS": "1" }` inside the `"outlook-desktop"` block of the
+desktop app's config (or `-e OUTLOOK_MCP_OPEN_DRAFTS=1` on the `claude mcp add` command).
+
+### Font
 
 Drafts written through this server are in **Aptos 12 pt black** by default, with your usual
 signature underneath. To change the font, set environment variables before Claude starts the

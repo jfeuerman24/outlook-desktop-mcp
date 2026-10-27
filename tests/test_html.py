@@ -20,10 +20,11 @@ class StyleTests(unittest.TestCase):
 
     def test_text_to_html_paragraphs_and_escaping(self):
         out = h.text_to_html("Hi Linda,\n\nThanks & see <attached>.\nTalk Thursday.\r\n\r\nAlex")
-        self.assertEqual(out.count("<p "), 3)
+        self.assertEqual(out.count("<p "), 5)  # 3 paragraphs + 2 blank-line spacers
+        self.assertEqual(out.count("&nbsp;"), 2)
         self.assertIn("Thanks &amp; see &lt;attached&gt;.<br>Talk Thursday.", out)
         self.assertIn('font-family:Aptos', out)
-        self.assertTrue(out.startswith('<p style="margin:0 0 12pt 0;font-family:Aptos'))
+        self.assertTrue(out.startswith('<p style="margin:0;line-height:100%;font-family:Aptos'))
 
     def test_inject_into_body_sits_above_quoted_history(self):
         doc = '<html><head></head><body lang="EN-US" style="x"><div>From: old</div></body></html>'
@@ -39,3 +40,21 @@ class StyleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_text_to_html_lists_quotes_and_bold(self):
+        out = h.text_to_html(
+            "Steps:\n\n1. First **thing**\n2. Second\n   continued\n\n- a\n- b\n\n> paste me\n> and me\n\nDone & dusted."
+        )
+        self.assertIn("<ol", out)
+        self.assertIn("<li", out)
+        self.assertIn("First <b>thing</b>", out)
+        self.assertIn("Second<br>continued", out)
+        self.assertIn("<ul", out)
+        self.assertEqual(out.count("<li"), 4)
+        self.assertIn("margin-left:24pt", out)
+        self.assertIn("line-height:100%", out)
+        self.assertEqual(out.count("&nbsp;"), 4)  # one blank line between each of the 5 blocks
+        self.assertIn("paste me<br>and me", out)
+        self.assertIn("Done &amp; dusted.", out)
+        self.assertNotIn("**", out)
+

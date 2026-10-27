@@ -27,7 +27,9 @@ import os
 from outlook_desktop_mcp.tools.calendars import describe_calendars, resolve_calendars
 from outlook_desktop_mcp.tools.conversation import conversation_items
 from outlook_desktop_mcp.utils.addresses import get_smtp, sender_matches
-from outlook_desktop_mcp.utils.html import inject_into_body, plain_text_mode, style_html, text_to_html
+from outlook_desktop_mcp.utils.html import (
+    inject_into_body, open_drafts_default, plain_text_mode, style_html, text_to_html,
+)
 from outlook_desktop_mcp.tools._folder_constants import (
     FOLDER_NAME_TO_ENUM,
     OL_MAIL_ITEM,
@@ -345,9 +347,15 @@ def _write_draft_text(item, body: str, html_body: str = "") -> None:
     item.HTMLBody = inject_into_body(str(_safe_get(lambda: item.HTMLBody) or ""), fragment)
 
 
-def _save_draft(item, kind: str, open_in_outlook: bool, **extra) -> str:
-    """Save ``item`` without sending, optionally open it in Outlook, describe the result."""
+def _save_draft(item, kind: str, open_in_outlook: bool | None, **extra) -> str:
+    """Save ``item`` without sending, optionally open it in Outlook, describe the result.
+
+    ``open_in_outlook=None`` means "use the OUTLOOK_MCP_OPEN_DRAFTS setting", which is
+    off by default: the draft just lands in Drafts.
+    """
     item.Save()
+    if open_in_outlook is None:
+        open_in_outlook = open_drafts_default()
     opened = False
     if open_in_outlook:
         try:
@@ -369,7 +377,8 @@ def _save_draft(item, kind: str, open_in_outlook: bool, **extra) -> str:
         "entry_id": str(_safe_get(lambda: item.EntryID) or ""),
         "folder": folder,
         "opened_in_outlook": opened,
-        "note": "Nothing has been sent. The user must open the draft in Outlook, check it and press Send.",
+        "note": ("Nothing has been sent. " + ("It is open in an Outlook window. " if opened else "It is in the Drafts folder, not opened. ")
+                 + "The user checks it in Outlook and presses Send."),
         **extra,
     }, indent=2, default=str)
 
@@ -387,16 +396,27 @@ async def draft_email(
     bcc: str = "",
     html_body: str = "",
     account: str = "",
-    open_in_outlook: bool = True,
+    open_in_outlook: bool | None = None,
 ) -> str:
     """Write a new email to the Drafts folder. It is NOT sent.
+
+    BEFORE CALLING THIS: show the complete draft in the chat first (recipients,
+    subject, full text) and work on it there until the user is happy. Then ask
+    explicitly, as its own question, whether to put it in Outlook, and call this
+    tool only after the user says yes. Never call it as the first step of a
+    "write an email" request. The user wants to see and edit drafts in the
+    conversation, not discover them in Outlook.
 
     The draft is saved in the chosen account's Drafts folder, with the user's
     signature below the text, and by default opened in an Outlook window so the
     user can read it and press Send themselves. The text is written as HTML in
     the user's default font (Aptos 12 pt black unless the OUTLOOK_MCP_FONT_*
-    environment variables say otherwise); write the body as normal prose with
-    blank lines between paragraphs.
+    environment variables say otherwise). Write the body as normal prose with
+    blank lines between paragraphs. Light structure is rendered properly: lines
+    starting "1." become a numbered list, "-" a bulleted list (a following line
+    without a marker continues the item), lines starting "> " are indented (use
+    for text the reader should copy), and **bold** works. Prefer this over
+    html_body.
 
     Args:
         to: One or more recipient email addresses, separated by semicolons.
@@ -410,8 +430,9 @@ async def draft_email(
         account: Optional. Account display name (or substring) the draft belongs
             to and will be sent from. Default: primary account. Use list_accounts
             to see available accounts.
-        open_in_outlook: If true (default), open the draft in an Outlook window
-            right away. Set false when preparing several drafts at once.
+        open_in_outlook: Optional. True also opens the draft in an Outlook
+            window; false only saves it to Drafts. Leave unset to follow the
+            OUTLOOK_MCP_OPEN_DRAFTS setting (default: only save).
 
     Returns:
         JSON with status "draft_saved", sent=false, entry_id, folder and whether
@@ -821,9 +842,16 @@ async def draft_reply(
     body: str,
     reply_all: bool = False,
     account: str = "",
-    open_in_outlook: bool = True,
+    open_in_outlook: bool | None = None,
 ) -> str:
     """Write a reply to an email as a draft. It is NOT sent.
+
+    BEFORE CALLING THIS: show the complete draft in the chat first (recipients,
+    subject, full text above the quoted thread) and work on it there until the user is happy. Then ask
+    explicitly, as its own question, whether to put it in Outlook, and call this
+    tool only after the user says yes. Never call it as the first step of a
+    "write an email" request. The user wants to see and edit drafts in the
+    conversation, not discover them in Outlook.
 
     Creates Outlook's normal reply (recipients filled in, quoted history and
     signature below), puts the text above it in the user's default font, saves
@@ -837,8 +865,9 @@ async def draft_reply(
             If false (default), address only the sender.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
-        open_in_outlook: If true (default), open the draft in an Outlook window
-            right away. Set false when preparing several drafts at once.
+        open_in_outlook: Optional. True also opens the draft in an Outlook
+            window; false only saves it to Drafts. Leave unset to follow the
+            OUTLOOK_MCP_OPEN_DRAFTS setting (default: only save).
 
     Returns:
         JSON with status "draft_saved", sent=false, entry_id of the draft and
@@ -1304,9 +1333,16 @@ async def draft_meeting(
     body: str = "",
     optional_attendees: str = "",
     account: str = "",
-    open_in_outlook: bool = True,
+    open_in_outlook: bool | None = None,
 ) -> str:
     """Prepare a meeting with attendees on the calendar. Invitations are NOT sent.
+
+    BEFORE CALLING THIS: show the complete invitation in the chat first (attendees,
+    subject, time, location, text) and work on it there until the user is happy. Then ask
+    explicitly, as its own question, whether to put it in Outlook, and call this
+    tool only after the user says yes. Never call it as the first step of a
+    "write an email" request. The user wants to see and edit invitations in the
+    conversation, not discover them in Outlook.
 
     The meeting is saved on the user's calendar with the attendees filled in
     and invitations unsent (Outlook marks it "invitations have not been sent"),
@@ -1326,8 +1362,9 @@ async def draft_meeting(
         account: Optional. Account display name (or substring) whose calendar
             the meeting goes on and which it will be sent from. Default: primary
             account. Use list_accounts to see available accounts.
-        open_in_outlook: If true (default), open the meeting in an Outlook
-            window right away.
+        open_in_outlook: Optional. True also opens the meeting in an Outlook
+            window; false only saves it to the calendar. Leave unset to follow
+            the OUTLOOK_MCP_OPEN_DRAFTS setting (default: only save).
 
     Returns:
         JSON with status "draft_saved", sent=false, entry_id and the calendar

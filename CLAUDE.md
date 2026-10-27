@@ -101,9 +101,9 @@ Give five or six examples tuned to the accounts you just saw, for instance:
 - "Read the newest one and give me the whole thread."
 - "What's on all my calendars Tuesday and Wednesday?"
 - "Save the attachment from that email to my Downloads folder."
-- "Draft a reply saying I can do Thursday." The reply opens in Outlook; they read it and press Send.
-- "Set up a 30-minute meeting with alex@example.com tomorrow at 2pm." The invitation opens
-  unsent for them to review.
+- "Draft a reply saying I can do Thursday." The reply lands in Drafts; they open it and press Send.
+- "Set up a 30-minute meeting with alex@example.com tomorrow at 2pm." The invitation sits on
+  their calendar unsent for them to review.
 
 Repeat once that nothing is sent without them pressing Send in Outlook. Point to README.md for
 the full list of tools.
@@ -125,5 +125,8 @@ the full list of tools.
 - Edit Claude's settings file only through `scripts\configure_claude_desktop.py`, which keeps a
   backup. Never hand-edit it.
 - Do not tell the person this tool can send email. It cannot.
+- Drafts are written in the chat first. When asked for an email, reply or meeting, show the
+  whole thing in the conversation, revise it there, and then ask explicitly whether to put it
+  in Outlook. Call `draft_email`, `draft_reply` or `draft_meeting` only after a yes.
 - Do not read their mail during setup beyond the test call, unless they ask.
 - Keep the chat about setup; this folder's code is not the point for a new user.
