@@ -50,12 +50,13 @@ async def run_tests():
                 tool_names = [t.name for t in tools_result.tools]
                 calendar_tools = [
                     "list_events", "get_event", "create_event",
-                    "create_meeting", "update_event", "delete_event",
-                    "respond_to_meeting", "search_events",
+                    "draft_meeting", "update_event", "delete_event",
+                    "search_events",
                 ]
                 missing = [n for n in calendar_tools if n not in tool_names]
                 assert not missing, f"Missing calendar tools: {missing}"
-                log(f"  All 8 calendar tools present (total tools: {len(tool_names)})")
+                assert "respond_to_meeting" not in tool_names, "respond_to_meeting must not exist (it would send)"
+                log(f"  All 7 calendar tools present (total tools: {len(tool_names)})")
                 passed += 1
                 log("  PASS")
             except Exception as e:
@@ -122,25 +123,27 @@ async def run_tests():
             except Exception as e:
                 log(f"  FAIL: {e}")
 
-            # ----- Test 5: create_meeting -----
+            # ----- Test 5: draft_meeting (saved on the calendar, invitations unsent) -----
             total += 1
-            log("\n--- Test 5: create_meeting ---")
+            log("\n--- Test 5: draft_meeting ---")
             try:
                 start = (datetime.now() + timedelta(days=4, hours=3))
                 end = start + timedelta(minutes=30)
-                result = await session.call_tool("create_meeting", {
+                result = await session.call_tool("draft_meeting", {
                     "subject": "MCP Calendar Meeting Test",
                     "start": start.strftime("%Y-%m-%d %H:%M"),
                     "end": end.strftime("%Y-%m-%d %H:%M"),
                     "required_attendees": "user@example.com",
                     "location": "Virtual via MCP",
-                    "body": "Meeting created through MCP calendar tools.",
+                    "body": "Meeting prepared through MCP calendar tools.",
+                    "open_in_outlook": False,
                 })
                 content = result.content[0].text
                 log(f"  Result: {content}")
-                assert "sent" in content.lower() or "created" in content.lower()
+                data = json.loads(content)
+                assert data["status"] == "draft_saved" and data["sent"] is False
                 passed += 1
-                log("  PASS")
+                log("  PASS (discard the unsent meeting in Outlook when done)")
             except Exception as e:
                 log(f"  FAIL: {e}")
 

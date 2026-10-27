@@ -7,6 +7,5 @@ build/
 *.egg
 .eggs/
 
-# Claude Code local context (not shared in repo)
-CLAUDE.md
+# Claude Code local settings (CLAUDE.md is intentionally tracked: it is the setup guide)
 .claude/

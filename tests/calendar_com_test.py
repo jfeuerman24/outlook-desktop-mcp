@@ -126,8 +126,8 @@ def test_create_appointment(outlook):
     log(f"  EntryID: {appt.EntryID[:40]}...")
 
 
-def test_create_meeting(outlook):
-    """Test 4: Create a meeting with an attendee and send the invite."""
+def test_draft_meeting(outlook):
+    """Test 4: Put a meeting with an attendee on the calendar. The invite is NOT sent."""
     appt = outlook.CreateItem(1)
     start = datetime.now() + timedelta(days=4, hours=3)
     end = start + timedelta(minutes=30)
@@ -143,8 +143,8 @@ def test_create_meeting(outlook):
     recipient.Type = 1  # olRequired
     appt.Recipients.ResolveAll()
 
-    appt.Send()
-    log(f"  Meeting sent: '{appt.Subject}' to user@example.com")
+    appt.Save()
+    log(f"  Meeting saved with invitation unsent: '{appt.Subject}' (discard it in Outlook)")
 
 
 def test_update_event(namespace):
@@ -230,7 +230,7 @@ def main():
         ("List Upcoming Events (7 days)", lambda: test_list_upcoming_events(namespace)),
         ("Read Event Details", lambda: test_read_event_details(namespace)),
         ("Create Appointment", lambda: test_create_appointment(outlook)),
-        ("Create Meeting (send invite)", lambda: test_create_meeting(outlook)),
+        ("Draft Meeting (invite not sent)", lambda: test_draft_meeting(outlook)),
         ("Update Event", lambda: test_update_event(namespace)),
         ("Delete Event", lambda: test_delete_event(namespace)),
         ("Search Events", lambda: test_search_events(namespace)),

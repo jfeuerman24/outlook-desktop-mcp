@@ -1,14 +1,14 @@
-"""Outgoing HTML styling so mail sent through the server matches the user's Outlook default font.
+"""HTML styling so drafts written by the server match the user's Outlook default font.
 
 Outlook's reply template and plain ``Body`` assignments fall back to the recipient's or
-Word's defaults (often Calibri 11). ``send_email`` and ``reply_email`` wrap what they send
+Word's defaults (often Calibri 11). ``draft_email`` and ``draft_reply`` wrap what they write
 in an explicit font so it renders the same everywhere. Defaults: Aptos, 12 pt, black.
 Override with environment variables:
 
     OUTLOOK_MCP_FONT_FAMILY   (default "Aptos")
     OUTLOOK_MCP_FONT_SIZE_PT  (default "12")
     OUTLOOK_MCP_FONT_COLOR    (default "#000000")
-    OUTLOOK_MCP_PLAIN_TEXT=1  send plain text instead of styled HTML
+    OUTLOOK_MCP_PLAIN_TEXT=1  write plain text instead of styled HTML
 
 Paragraphs are wrapped as ``<p style=…><span style=…>`` because Outlook's Word renderer
 ignores inherited font on a bare container; this mirrors what Outlook itself writes.

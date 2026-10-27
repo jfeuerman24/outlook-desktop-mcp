@@ -68,18 +68,18 @@ def test_filter_unread(namespace):
     return unread.Count
 
 
-def test_send_email(outlook):
-    """Test 5: Create and send a test email to self."""
+def test_draft_email(outlook):
+    """Test 5: Create a test email in Drafts. Nothing is sent."""
     mail = outlook.CreateItem(0)  # 0 = olMailItem
     mail.To = "user@example.com"
     mail.Subject = "Outlook Desktop MCP - COM Test"
     mail.Body = (
         "This is an automated test from the Outlook Desktop MCP COM validation.\n"
-        f"Sent at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        "\nIf you received this, COM send_email works."
+        f"Written at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        "\nIt should be sitting in Drafts, unsent. Delete it."
     )
-    mail.Send()
-    log("  Email sent to user@example.com")
+    mail.Save()
+    log(f"  Draft saved (not sent): '{mail.Subject}' in {mail.Parent.Name}")
 
 
 def test_mark_read_unread(namespace):
@@ -173,7 +173,7 @@ def main():
         ("List Default Folders", lambda: test_list_folders(namespace)),
         ("Read Inbox (top 5)", lambda: test_read_inbox(namespace)),
         ("Filter Unread Emails", lambda: test_filter_unread(namespace)),
-        ("Send Test Email", lambda: test_send_email(outlook)),
+        ("Write Test Draft (not sent)", lambda: test_draft_email(outlook)),
         ("Mark Read/Unread Cycle", lambda: test_mark_read_unread(namespace)),
         ("Move to Archive & Back", lambda: test_move_to_archive(namespace)),
         ("Search by Subject", lambda: test_search(namespace)),

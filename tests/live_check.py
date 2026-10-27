@@ -1,8 +1,9 @@
 """
-Live check of the fork's additions over stdio, in READ-ONLY mode.
-Needs Outlook Desktop (Classic) running. Sends nothing, changes nothing.
+Live check of the fork's additions over stdio. Needs Outlook Desktop (Classic) running.
+Only reads: it lists accounts, calendars and events, searches mail, reads one message and
+its thread. It writes no drafts and changes nothing.
 
-Run: .venv\\Scripts\\python tests\\live_readonly_check.py [sender-substring]
+Run: .venv\\Scripts\\python tests\\live_check.py [sender-substring]
 """
 import asyncio
 import json
@@ -26,9 +27,7 @@ async def run(sender_needle: str):
     from mcp.client.stdio import stdio_client, StdioServerParameters
     from mcp.client.session import ClientSession
 
-    params = StdioServerParameters(
-        command=sys.executable, args=["-m", "outlook_desktop_mcp", "--read-only"], cwd=ROOT,
-    )
+    params = StdioServerParameters(command=sys.executable, args=["-m", "outlook_desktop_mcp"], cwd=ROOT)
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -43,8 +42,8 @@ async def run(sender_needle: str):
 
             tools = sorted(t.name for t in (await session.list_tools()).tools)
             log(f"tools ({len(tools)}): {', '.join(tools)}")
-            writes = {"send_email", "reply_email", "move_email", "delete_event", "create_task"}
-            assert not (writes & set(tools)), "write tools leaked into read-only mode"
+            senders = {"send_email", "reply_email", "create_meeting", "respond_to_meeting"}
+            assert not (senders & set(tools)), "a sending tool is registered"
 
             accounts = await call("list_accounts")
             log(f"\naccounts: {[a['display_name'] for a in accounts]}")

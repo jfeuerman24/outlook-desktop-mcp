@@ -2,114 +2,70 @@
 
 [![PyPI](https://img.shields.io/pypi/v/outlook-desktop-mcp)](https://pypi.org/project/outlook-desktop-mcp/)
 [![Python](https://img.shields.io/pypi/pyversions/outlook-desktop-mcp)](https://pypi.org/project/outlook-desktop-mcp/)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue)]()
+[![Platform](https://img.shields.io/badge/platform-Windows-blue)]()
 
-**Turn your running Outlook Desktop into an MCP server.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
+**Lets Claude use the Outlook that is already open on your Windows PC.**
 
-Any MCP client (Claude Code, Claude Desktop, etc.) can then send emails, manage your calendar, create tasks, handle attachments, and more — all through your existing Outlook session.
+Claude can look through your mail, calendars and tasks, find things, pull a whole thread
+together, and write emails, replies and meeting invitations for you. **It never sends
+anything.** Whatever it writes goes to your Drafts folder (or onto your calendar with the
+invitations unsent) and pops up in Outlook for you to read and send yourself.
 
-> **New here? Follow [SETUP.md](SETUP.md)** — step-by-step instructions for the Claude desktop app
-> and Claude Code, including the Outlook security prompt.
->
-> **This is a fork** of [Aanerud/outlook-desktop-mcp](https://github.com/Aanerud/outlook-desktop-mcp)
-> (AGPL-3.0, see [LICENSE](LICENSE)). It adds the changes below; everything else is the upstream project.
+There is no Microsoft account setup, nothing for an admin to approve, and no password to hand
+over. The server talks to the Outlook program on your computer the way an add-in would, so it
+has the access you already have, and only while Outlook is open.
 
-## What this fork adds
-
-| Change | Where |
+| Claude can | Claude cannot |
 |---|---|
-| **Read-only mode.** `outlook-desktop-mcp --read-only` (or `OUTLOOK_MCP_READ_ONLY=1`) registers only tools that read. Send, reply, move, mark, create, update, delete, respond, complete and toggle tools are not exposed at all, so a prompt (or a malicious email) cannot make the client act on your mailbox. Works on Windows and macOS. | `readonly.py`, `entrypoint.py` |
-| **Every calendar, not just the default.** New `list_calendars` tool; `list_events` and `search_events` take `calendar` (`""` = main Calendar, `"all"` = every calendar in the account, or a name/path such as `Calendar/Family`). Each event says which calendar it came from. | `tools/calendars.py` |
-| **Thread reconstruction.** New `get_conversation` tool walks Outlook's conversation across folders and dates, deduped by Message-ID, oldest first, with a ConversationTopic fallback. | `tools/conversation.py` |
-| **Quoted history trimmed before the length cap.** `read_email` returns the message's own text (`body_trimmed` says if anything was cut); `include_history=true` gives the raw body. Outlook's "You don't often get email from…" banner is removed. | `utils/text.py` |
-| **Sender filter and subtree search.** `list_emails` and `search_emails` take `sender` (substring of address or name) and `include_subfolders`. `search_emails` may be called with just a sender. | `server.py` |
-| **Exchange addresses resolved to SMTP.** `sender` is a real address instead of `/o=ExchangeLabs/…`; full reads include `recipients` with resolved addresses. | `utils/addresses.py` |
-| **ISO 8601 dates with the local UTC offset** everywhere (`2026-10-26T17:40:00-04:00`); Outlook's "no date" becomes `null`. Events that started before the range but overlap it are included. | `utils/dates.py` |
-| **Outgoing mail in a fixed font.** `send_email` and `reply_email` write HTML in Aptos 12 pt black (overridable with `OUTLOOK_MCP_FONT_*`, or `OUTLOOK_MCP_PLAIN_TEXT=1`); replies are injected above Outlook's quoted history instead of replacing it with plain text. | `utils/html.py` |
-| **Offline unit tests** (`python -m unittest discover -s tests`) and a GitHub Actions workflow that runs them. PyPI publishing is manual in this fork. | `tests/test_*.py` |
+| List, search and read mail, calendars and tasks. Save attachments to a folder. Write draft emails and replies. Prepare meeting invitations. Create and change appointments and tasks. Move and mark mail, set categories, switch rules on and off. | Send anything. Accept or decline invitations. Cancel meetings you organised. |
 
-## Quick Start
+> **This is a fork** of [Aanerud/outlook-desktop-mcp](https://github.com/Aanerud/outlook-desktop-mcp)
+> (AGPL-3.0, see [LICENSE](LICENSE)). It is Windows-only and never sends; the changes are listed
+> under [What this fork changes](#what-this-fork-changes).
 
-**1. Install** (requires Python 3.12+). From this fork:
+## Getting started (Claude does the setup)
 
-```bash
-git clone https://github.com/jfeuerman24/outlook-desktop-mcp.git
-cd outlook-desktop-mcp
-python -m venv .venv
-.venv\Scripts\activate
-pip install -e .
-```
+You need a Windows PC with **classic Outlook** signed in, and the **Claude desktop app**. Allow
+five minutes. You will not type any commands; Claude runs them and explains as it goes.
 
-(The upstream release is `pip install outlook-desktop-mcp`; it does not include this fork's changes.)
+1. **Make an empty folder** for it, for example `C:\Users\<you>\outlook-desktop-mcp`
+   (open your user folder in File Explorer, right-click → **New** → **Folder**). Avoid OneDrive folders.
+2. **Open it in Claude.** In the Claude desktop app, use **Claude Code**: choose to work on
+   **this computer** and pick the folder you just made.
+3. **Paste this as your first message:**
 
-**2. Register with Claude Code:**
+   > Set up the Outlook connector: clone https://github.com/jfeuerman24/outlook-desktop-mcp.git
+   > into this folder, then read its CLAUDE.md and walk me through it.
 
-```bash
-claude mcp add outlook-desktop -- C:\path\to\outlook-desktop-mcp\.venv\Scripts\outlook-desktop-mcp.exe --read-only
-```
+4. Claude explains what the tool does, checks the PC, installs it, and adds it to Claude's own
+   settings (keeping a backup of the old settings file). It then asks you to **quit Claude from
+   the system tray and open it again** — that is the only thing you do yourself. Come back to
+   the folder and say **"test it"**.
 
-Drop `--read-only` if you want Claude to be able to send, move and create things.
+The first time Claude touches Outlook, Outlook asks whether to allow it. Tick **Allow access
+for**, pick **10 minutes**, and carry on; see [the security prompt](#outlook-programmatic-access-security-prompts)
+for the permanent options.
 
-**Or register with Claude Desktop:** Settings → Developer → Edit Config, then add to `claude_desktop_config.json` (use the full path; Claude Desktop starts servers with a minimal PATH):
+Already downloaded the ZIP from GitHub? Unzip it, open that folder with Claude Code, and say
+**"let's get started"**. Prefer to do it by hand, or want it in Claude Code's terminal? See
+[SETUP.md](SETUP.md). You can also double-click `install.cmd` in the folder, which does the
+install and the settings change without Claude.
 
-```json
-{
-  "mcpServers": {
-    "outlook-desktop": {
-      "command": "C:\\path\\to\\outlook-desktop-mcp\\.venv\\Scripts\\outlook-desktop-mcp.exe",
-      "args": ["--read-only"]
-    }
-  }
-}
-```
+### Uninstall
 
-**3. Open Outlook and start a Claude session.** That's it — tools are available immediately.
-
-## How It Works — Platform Routing
-
-When the server starts, it checks which operating system it is running on and takes one of two paths:
-
-```
-                        outlook-desktop-mcp starts
-                                  |
-                          sys.platform check
-                         /                  \
-                   "win32"                "darwin"
-                      |                      |
-              ┌───────┴────────┐    ┌────────┴────────┐
-              │  server.py     │    │  server_mac.py   │
-              │  COM Bridge    │    │  AppleScript     │
-              │  (29 tools)    │    │  Bridge          │
-              │                │    │  (22 tools)      │
-              └───────┬────────┘    └────────┬─────────┘
-                      |                      |
-              OUTLOOK.EXE via         Microsoft Outlook
-              COM / STA thread        via osascript
-                      |                      |
-              Exchange / M365         Exchange / M365
-```
-
-**Both paths use your locally running Outlook app and its existing authenticated session.** No cloud credentials, no Graph API tokens — the server inherits whatever account Outlook is signed into.
-
-### Why two paths?
-
-Windows Outlook (Classic) exposes a rich COM automation interface — the Outlook Object Model (`MSOUTL.OLB`). This has been the standard way to programmatically control Outlook on Windows for over 20 years. It provides deep access to mail rules, categories, MAPI properties, and the full folder hierarchy.
-
-Mac Outlook does not support COM. Instead, it exposes an AppleScript dictionary that can be driven via the `osascript` command. The AppleScript interface covers the core operations — email, calendar, tasks — but does not expose rules, categories, or certain advanced MAPI features. This is a limitation of what Microsoft chose to include in Outlook for Mac's scripting dictionary, not a limitation of this project.
-
-The server is structured as two parallel implementations with identical tool names and signatures, so MCP clients see the same interface regardless of platform. Tools that are not available on a given platform are simply not registered.
+Ask Claude to remove it, or run `.venv\Scripts\python.exe scripts\configure_claude_desktop.py --remove`,
+restart Claude, and delete the folder.
 
 ## Requirements
 
-### Windows
-
 - **Outlook Desktop (Classic)** — the `OUTLOOK.EXE` that comes with Microsoft 365 / Office. The new "modern" Outlook (`olk.exe`) does **not** support COM
-- **Python 3.12+** (x64 or ARM64)
+- **Windows 10 or 11**, x64 or ARM64
+- **Python 3.12+**
 - **Outlook must be running** when the MCP server starts
 
-Both x64 and ARM64 Windows are supported. On ARM64, all dependencies (`pywin32`, `mcp`, `pydantic-core`, `cryptography`, `cffi`, `rpds-py`) have prebuilt `win_arm64` wheels — see the [ARM64 install notes](#arm64-windows) below for the one extra `pip` flag you need.
+On ARM64, all dependencies (`pywin32`, `mcp`, `pydantic-core`, `cryptography`, `cffi`, `rpds-py`) have prebuilt `win_arm64` wheels — see the [ARM64 install notes](#windows-arm64) below for the one extra `pip` flag you need.
 
-#### Outlook "Programmatic Access" security prompts
+### Outlook "Programmatic Access" security prompts
 
 When the MCP server first touches Outlook's COM API, Outlook may show a dialog: *"A program is trying to access email address information stored in Outlook"* (the Object Model Guard / Programmatic Access prompt). This is Outlook's protection against malicious automation.
 
@@ -127,106 +83,87 @@ You have three options:
 
 > **Windows 11 ARM64 note:** Defender does not register with Outlook's `IOfficeAntiVirus` interface on ARM64, so Trust Center shows *"Antivirus status: Invalid"* and the *"Never warn me about suspicious activity"* radio stays greyed out **even when Outlook is launched as Administrator**. Option 2 is unavailable on ARM64; the `reg import` from option 3 is the only durable suppression path.
 
-### macOS
-
-- **Microsoft Outlook for Mac** — version 16.x or later
-- **Python 3.12+**
-- **Outlook must be running** when the MCP server starts
-
-#### Required macOS permissions
-
-The first time a tool runs, macOS will show **two permission prompts** that you must approve:
-
-1. **Privacy & Automation** — a system dialog asks: *"python3.12 wants to control Microsoft Outlook"*. Click **Allow** to let the server send AppleScript commands to Outlook.
-
-2. **Accessibility** — to read your Exchange/M365 inbox, the server uses macOS UI scripting (System Events). This requires Accessibility access for `python3.12`:
-   - Open **System Settings > Privacy & Security > Accessibility**
-   - Find **python3.12** in the list (it appears after the first prompt)
-   - Toggle it **on**
-
-   Without Accessibility enabled, calendar, tasks, and local folder tools will work, but listing Exchange inbox messages will return empty results.
-
-Both permissions are one-time setup — macOS remembers them for future sessions.
-
-## Available Tools by Platform
+## Tools
 
 ### Email
 
-| Tool | Windows | macOS | Description |
-|------|:-------:|:-----:|-------------|
-| `send_email` | yes | yes | Send an email with To/CC/BCC, plain text or HTML body |
-| `list_emails` | yes | yes | List recent emails from any folder, with optional unread, date, sender and subfolder filters |
-| `read_email` | yes | yes | Read full email content by entry ID or subject search (quoted history trimmed unless `include_history`) |
-| `search_emails` | yes | yes | Full-text search across email subjects and bodies, optionally by sender and across subfolders |
-| `get_conversation` | yes | — | Every message of a thread, oldest first, each once, across folders and dates |
-| `reply_email` | yes | yes | Reply or reply-all, preserving the conversation thread |
-| `mark_as_read` | yes | yes | Mark a specific email as read |
-| `mark_as_unread` | yes | yes | Mark a specific email as unread |
-| `move_email` | yes | yes | Move an email to Archive, Trash, or any folder |
-| `list_folders` | yes | yes | Browse the folder hierarchy with item counts |
+| Tool | Description |
+|------|-------------|
+| `list_emails` | List recent emails from any folder, with optional unread, date, sender and subfolder filters |
+| `read_email` | Read full email content by entry ID or subject search (quoted history trimmed unless `include_history`) |
+| `search_emails` | Full-text search across email subjects and bodies, optionally by sender and across subfolders |
+| `get_conversation` | Every message of a thread, oldest first, each once, across folders and dates |
+| `list_folders` | Browse the folder hierarchy with item counts |
+| `draft_email` | Write a new email to Drafts with To/CC/BCC and open it in Outlook. **Not sent.** |
+| `draft_reply` | Write a reply or reply-all above the quoted thread, save to Drafts, open in Outlook. **Not sent.** |
+| `mark_as_read` | Mark a specific email as read |
+| `mark_as_unread` | Mark a specific email as unread |
+| `move_email` | Move an email to Archive, Trash, or any folder |
 
 ### Calendar
 
-| Tool | Windows | macOS | Description |
-|------|:-------:|:-----:|-------------|
-| `list_calendars` | yes | — | List every calendar folder in an account (Birthdays, holidays, shared, subscribed) |
-| `list_events` | yes | yes | List events within a date range, from one calendar or `calendar="all"` |
-| `get_event` | yes | yes | Read full event details by entry ID |
-| `create_event` | yes | yes | Create a personal calendar appointment |
-| `create_meeting` | yes | yes | Create a meeting and send invitations to attendees |
-| `update_event` | yes | yes | Modify an existing event's subject, time, location, etc. |
-| `delete_event` | yes | yes | Delete an appointment or cancel a meeting |
-| `respond_to_meeting` | yes | — | Accept, decline, or tentatively accept a meeting invite |
-| `search_events` | yes | yes | Search calendar events by keyword within a date range |
+| Tool | Description |
+|------|-------------|
+| `list_calendars` | List every calendar folder in an account (Birthdays, holidays, shared, subscribed) |
+| `list_events` | List events within a date range, from one calendar or `calendar="all"` |
+| `get_event` | Read full event details by entry ID |
+| `search_events` | Search calendar events by keyword within a date range |
+| `create_event` | Create a personal calendar appointment (no attendees) |
+| `draft_meeting` | Put a meeting with attendees on the calendar and open it in Outlook. **Invitations not sent.** |
+| `update_event` | Change an event's subject, time, location, etc. Saved, not sent |
+| `delete_event` | Delete an appointment or a received meeting. Refuses meetings you organised |
 
 ### Tasks
 
-| Tool | Windows | macOS | Description |
-|------|:-------:|:-----:|-------------|
-| `list_tasks` | yes | yes | List pending or completed tasks, sorted by due date |
-| `get_task` | yes | yes | Read full task details including body and completion status |
-| `create_task` | yes | yes | Create a new task with subject, due date, importance |
-| `complete_task` | yes | yes | Mark a task as complete |
-| `delete_task` | yes | yes | Remove a task |
+| Tool | Description |
+|------|-------------|
+| `list_tasks` | List pending or completed tasks, sorted by due date |
+| `get_task` | Read full task details including body and completion status |
+| `create_task` | Create a new task with subject, due date, importance |
+| `complete_task` | Mark a task as complete |
+| `delete_task` | Remove a task |
 
-### Attachments
+### Attachments, accounts
 
-| Tool | Windows | macOS | Description |
-|------|:-------:|:-----:|-------------|
-| `list_attachments` | yes | yes | List all attachments on an email or calendar event |
-| `save_attachment` | yes | yes | Download an attachment to a local directory |
+| Tool | Description |
+|------|-------------|
+| `list_accounts` | List the mailboxes in the Outlook profile |
+| `list_attachments` | List all attachments on an email or calendar event |
+| `save_attachment` | Save an attachment to a local directory (writes to disk, never to the mailbox) |
 
-### Categories, Rules, Out of Office (Windows only)
+### Categories, Rules, Out of Office
 
-These tools rely on COM-specific APIs (MAPI property accessors, the Rules object model, and the Categories collection) that Outlook for Mac does not expose through AppleScript.
+| Tool | Description |
+|------|-------------|
+| `list_categories` | List all available color categories in Outlook |
+| `set_category` | Set or clear categories on any email, event, or task |
+| `list_rules` | List all mail rules with enabled/disabled status |
+| `toggle_rule` | Enable or disable a mail rule by name |
+| `get_out_of_office` | Check whether Out of Office auto-reply is on or off |
 
-| Tool | Windows | macOS | Description |
-|------|:-------:|:-----:|-------------|
-| `list_categories` | yes | — | List all available color categories in Outlook |
-| `set_category` | yes | — | Set or clear categories on any email, event, or task |
-| `list_rules` | yes | — | List all mail rules with enabled/disabled status |
-| `toggle_rule` | yes | — | Enable or disable a mail rule by name |
-| `get_out_of_office` | yes | — | Check whether Out of Office auto-reply is on or off |
+**Total: 31 tools.**
 
-**Total: 31 tools on Windows, 22 tools on macOS.** In `--read-only` mode: 17 on Windows, 10 on macOS.
+### Nothing sends
 
-### Read-only mode
+The three tools that would normally send instead save and hand over to you:
 
-```bash
-outlook-desktop-mcp --read-only
-```
+- `draft_email` writes a new message to the Drafts folder of the chosen account.
+- `draft_reply` builds Outlook's own reply or reply-all (recipients, quoted thread, signature) and puts the text above it.
+- `draft_meeting` puts the meeting on your calendar with the attendees filled in and the invitations unsent.
 
-or set `OUTLOOK_MCP_READ_ONLY=1`. The server then registers only: `list_accounts`, `list_emails`,
-`read_email`, `search_emails`, `get_conversation`, `list_folders`, `list_calendars`, `list_events`,
-`get_event`, `search_events`, `list_tasks`, `get_task`, `list_attachments`, `save_attachment`
-(writes to disk, never to the mailbox), `list_categories`, `list_rules`, `get_out_of_office`.
-The write tools are not merely refused — they are never registered, so the client does not see them.
+Each one saves the item and, unless called with `open_in_outlook=false`, opens it in an Outlook
+window so you can read it and press **Send**. The tool result says `"status": "draft_saved"`
+and `"sent": false`, with the entry ID and the folder, so Claude can tell you where it is.
+Drafts get your normal signature and the font described below.
+
+Deliberately missing: there is no tool to send, to accept or decline an invitation, or to
+cancel a meeting you organised, because every one of those sends a message. Do those in Outlook.
 
 ### Working with several calendars
 
 ```
 list_calendars account="personal"
-→ Calendar (default), Calendar/Birthdays, Calendar/United States holidays, Calendar/Kate Work
+→ Calendar (default), Calendar/Birthdays, Calendar/United States holidays, Calendar/Family
 
 list_events start_date="2026-10-27" end_date="2026-10-29" calendar="all" account="personal"
 → events from all four, each tagged with its calendar, sorted by start
@@ -235,11 +172,19 @@ list_events start_date="2026-10-27" end_date="2026-10-29" calendar="all" account
 To check availability across accounts, call `list_events` with `calendar="all"` once per account and
 compare the results.
 
-## Architecture Details
+### Draft font
 
-### Windows: COM Bridge (`com_bridge.py`)
+Drafts are written as HTML in Aptos 12 pt black so they look the same everywhere. Override with
+environment variables before the server starts: `OUTLOOK_MCP_FONT_FAMILY`, `OUTLOOK_MCP_FONT_SIZE_PT`,
+`OUTLOOK_MCP_FONT_COLOR`, or `OUTLOOK_MCP_PLAIN_TEXT=1` for plain text.
 
-All Outlook COM operations run on a dedicated thread using the Single-Threaded Apartment (STA) model, as required by COM. The async MCP event loop dispatches tool calls to this thread via a queue and awaits results, keeping COM threading rules respected and the MCP protocol non-blocking.
+## How it works
+
+Windows Outlook (Classic) exposes the Outlook Object Model over COM — the same automation interface
+add-ins and VBA have used for 20 years. All COM calls run on one dedicated thread using the
+Single-Threaded Apartment model, as COM requires. The async MCP event loop dispatches each tool call to
+that thread through a queue and awaits the result, so COM threading rules are respected and the MCP
+protocol stays non-blocking.
 
 ```
 MCP tool call (async)
@@ -250,35 +195,18 @@ MCP tool call (async)
   → JSON response back to MCP client
 ```
 
-Each tool's inner function receives the live `Outlook.Application` and `MAPI.Namespace` COM objects and works directly with the Outlook Object Model — `GetItemFromID`, `CreateItem`, `Items.Restrict` with DASL filters, and so on.
-
-### macOS: AppleScript Bridge (`applescript_bridge.py`)
-
-Each tool call builds an AppleScript string and executes it as a subprocess via `osascript`. There is no persistent connection — every call is stateless.
-
-```
-MCP tool call (async)
-  → build AppleScript string
-    → asyncio.create_subprocess_exec("osascript", "-e", script)
-    → parse stdout text into structured data
-  → JSON response back to MCP client
-```
-
-Each tool constructs a single AppleScript that fetches all needed data in one `osascript` call (no per-message subprocess loops). Results come back as delimited text, which the server parses into the same JSON structure the Windows server produces.
-
-**Key differences from Windows:**
-
-- Entry IDs on macOS are **numeric** (e.g. `42`), not hex strings. They identify items within their folder context.
-- Folder references use AppleScript's **locale-independent keywords** (`inbox`, `sent items`, `drafts`, `deleted items`) rather than localized folder names.
-- Search uses AppleScript's `whose` clause (e.g. `messages whose subject contains "query"`) instead of DASL filters.
-- User input is escaped for safe embedding in AppleScript strings to prevent script injection.
+Each tool's inner function receives the live `Outlook.Application` and `MAPI.Namespace` COM objects and
+works directly with the Outlook Object Model — `GetItemFromID`, `Items.Add`, `Items.Restrict` with DASL
+filters, and so on. See [`com_bridge.py`](src/outlook_desktop_mcp/com_bridge.py).
 
 ## Install from Source
+
+`install.ps1` performs everything in this section (and the Claude registration) automatically; the steps are listed for reference and for troubleshooting.
 
 ### Windows (x64)
 
 ```bash
-git clone https://github.com/Aanerud/outlook-desktop-mcp.git
+git clone https://github.com/jfeuerman24/outlook-desktop-mcp.git
 cd outlook-desktop-mcp
 python -m venv .venv
 .venv\Scripts\activate
@@ -297,7 +225,7 @@ claude mcp add outlook-desktop -- powershell.exe -Command "& 'C:\path\to\outlook
 The `[cli]` extra of `mcp` transitively pulls in `cryptography`, and pip's default resolver may pick a version that lacks a `win_arm64` wheel — which then fails to build because it requires a Rust toolchain plus OpenSSL. Install without the `cli` extra and force wheels-only resolution:
 
 ```powershell
-git clone https://github.com/Aanerud/outlook-desktop-mcp.git
+git clone https://github.com/jfeuerman24/outlook-desktop-mcp.git
 cd outlook-desktop-mcp
 & "C:\Program Files\Python312-arm64\python.exe" -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -309,46 +237,22 @@ python .venv\Scripts\pywin32_postinstall.py -install
 
 The base `mcp` package is sufficient for running the stdio server — the `[cli]` extra is only needed for the `mcp` developer CLI tools (`mcp dev`, `mcp inspector`), which aren't used at runtime.
 
-Register from source the same way as x64:
-
-```bash
-claude mcp add outlook-desktop -- powershell.exe -Command "& 'C:\path\to\outlook-desktop-mcp\outlook-desktop-mcp.cmd' mcp"
-```
-
-### macOS
-
-```bash
-git clone https://github.com/Aanerud/outlook-desktop-mcp.git
-cd outlook-desktop-mcp
-python3 -m venv .venv
-source .venv/bin/activate
-pip install "mcp[cli]" -e .
-```
-
-Register from source:
-
-```bash
-claude mcp add outlook-desktop -- /path/to/outlook-desktop-mcp/.venv/bin/python -m outlook_desktop_mcp
-```
+Register from source the same way as x64.
 
 ## Usage Examples
 
 Once registered, just talk to Claude naturally:
 
 - *"Show me my 10 most recent inbox emails"*
-- *"Read the email from Taylor about MLADS"*
-- *"Send an email to alice@example.com about the project update"*
-- *"What's on my calendar this week?"*
-- *"Create a meeting with bob@example.com tomorrow at 2pm for 30 minutes"*
+- *"Read the email from Taylor about MLADS and give me the whole thread"*
+- *"What's on all my calendars this week?"*
 - *"Save the attachment from that email to my Downloads folder"*
+- *"Draft a reply to Taylor saying I can do Thursday"* — the reply opens in Outlook; you press Send
+- *"Draft an email to alice@example.com about the project update"*
+- *"Set up a 30-minute meeting with bob@example.com tomorrow at 2pm"* — the invitation opens in Outlook; you press Send
 - *"Create a task to review the quarterly report, due Friday, high importance"*
 - *"Mark that email as read and move it to archive"*
-
-Windows-only examples:
-
 - *"What categories do I have? Set this email to 'Follow-up'"*
-- *"List my mail rules"*
-- *"Am I set as Out of Office?"*
 
 ## Why Not Microsoft Graph?
 
@@ -359,6 +263,7 @@ Windows-only examples:
 | OAuth token management | You handle refresh tokens | Not needed |
 | Tenant configuration | Required | Not needed |
 | Works offline / cached | No | Yes (reads from local cache) |
+| Can send on your behalf | Yes | Never — drafts only |
 | Setup time | 30-60 minutes | 2 minutes |
 | Auth requirement | **Your own OAuth flow** | **Outlook is open** |
 
@@ -367,34 +272,36 @@ Windows-only examples:
 ```
 outlook-desktop-mcp/
   src/outlook_desktop_mcp/
-    entrypoint.py            # Platform detection + --read-only flag → routes to correct server
-    readonly.py              # Read-only switch and the list of write tools
-    server.py                # Windows MCP server (31 tools, COM automation)
-    server_mac.py            # macOS MCP server (22 tools, AppleScript)
-    com_bridge.py            # Async-to-COM threading bridge (Windows)
-    applescript_bridge.py    # Async osascript execution (macOS)
+    entrypoint.py            # Windows check → server
+    server.py                # The MCP server (31 tools, COM automation, drafts only)
+    com_bridge.py            # Async-to-COM threading bridge
     tools/
-      _folder_constants.py   # Outlook enums and constants (Windows)
+      _folder_constants.py   # Outlook enums and constants
       calendars.py           # Every calendar folder in a store; calendar argument resolution
       conversation.py        # Conversation tree walk + ConversationTopic fallback
     utils/
-      formatting.py          # Email/event/task data extraction (Windows)
+      formatting.py          # Email/event/task data extraction
       text.py                # Quoted-history trimming, external-sender banner removal (pure)
       dates.py               # pywintypes → ISO 8601 with offset (pure)
       addresses.py           # Exchange DN → SMTP resolution, recipients
-      errors.py              # COM error formatting (Windows)
-      applescript_helpers.py # AppleScript escaping, date formatting (macOS)
+      html.py                # Draft font styling, injecting text above signature/quoted history (pure)
+      errors.py              # COM error formatting
   tests/
     test_text.py             # unit: trimming (no Outlook)
     test_dates.py            # unit: ISO dates (no Outlook)
-    test_readonly.py         # unit: read-only mode hides write tools (no Outlook)
-    live_readonly_check.py   # live: the fork's additions over stdio, read-only, sends nothing
-    phase1_com_test.py       # Email COM validation
-    phase3_mcp_test.py       # Email MCP test (sends a test email)
-    calendar_com_test.py     # Calendar COM validation
-    calendar_mcp_test.py     # Calendar MCP test
+    test_html.py             # unit: draft HTML (no Outlook)
+    live_check.py            # live: the fork's additions over stdio, reads only, changes nothing
+    phase1_com_test.py       # Email COM validation (writes a draft, sends nothing)
+    phase3_mcp_test.py       # Email MCP test (writes a draft, sends nothing)
+    calendar_com_test.py     # Calendar COM validation (prepares an unsent meeting)
+    calendar_mcp_test.py     # Calendar MCP test (prepares an unsent meeting)
     extras_com_test.py       # Tasks/attachments/categories/rules/OOF COM test
     extras_mcp_test.py       # Tasks/attachments/categories/rules/OOF MCP test
+  CLAUDE.md                 # Guide Claude follows to install and explain the tool for a new user
+  install.ps1               # Checks the PC, installs Python if needed, builds .venv, registers with Claude
+  install.cmd               # Double-click wrapper for install.ps1
+  scripts/
+    configure_claude_desktop.py  # Adds/removes the server in claude_desktop_config.json, with backup
   outlook-desktop-mcp.cmd   # Windows launcher script
   pyproject.toml
 ```

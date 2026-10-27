@@ -57,8 +57,8 @@ async def run_tests():
                     log(f"    - {t.name}: {desc}")
 
                 expected = [
-                    "send_email", "list_emails", "read_email", "mark_as_read",
-                    "mark_as_unread", "move_email", "reply_email",
+                    "draft_email", "list_emails", "read_email", "mark_as_read",
+                    "mark_as_unread", "move_email", "draft_reply",
                     "list_folders", "search_emails",
                 ]
                 missing = [n for n in expected if n not in tool_names]
@@ -134,20 +134,22 @@ async def run_tests():
             except Exception as e:
                 log(f"  FAIL: {e}")
 
-            # ----- Test 6: send_email -----
+            # ----- Test 6: draft_email (saved to Drafts, never sent) -----
             total += 1
-            log("\n--- Test 6: send_email ---")
+            log("\n--- Test 6: draft_email ---")
             try:
-                result = await session.call_tool("send_email", {
+                result = await session.call_tool("draft_email", {
                     "to": "user@example.com",
                     "subject": "Outlook Desktop MCP - Phase 3 MCP Test",
-                    "body": "Sent through the MCP server via stdio. If you see this, the MCP layer works!",
+                    "body": "Written through the MCP server via stdio. This should sit in Drafts, unsent.",
+                    "open_in_outlook": False,
                 })
                 content = result.content[0].text
                 log(f"  Result: {content}")
-                assert "sent" in content.lower()
+                data = json.loads(content)
+                assert data["status"] == "draft_saved" and data["sent"] is False
                 passed += 1
-                log("  PASS")
+                log("  PASS (delete the draft from the Drafts folder when done)")
             except Exception as e:
                 log(f"  FAIL: {e}")
 

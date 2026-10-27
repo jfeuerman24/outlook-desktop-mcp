@@ -1,26 +1,24 @@
 [project]
 name = "outlook-desktop-mcp"
 version = "0.4.0"
-description = "Outlook Desktop as an MCP server — Windows (COM) and macOS (AppleScript). No Graph API, no Entra app registration — just your local Outlook."
+description = "Classic Outlook Desktop on Windows as an MCP server: read mail, calendars and tasks; write drafts, never send. No Graph API, no Entra app registration."
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [
     { name = "Andreas Martin Aanerud", email = "aaanerud@microsoft.com" },
 ]
-keywords = ["mcp", "outlook", "email", "com", "applescript", "automation", "windows", "macos", "microsoft", "claude"]
+keywords = ["mcp", "outlook", "email", "com", "automation", "windows", "microsoft", "claude"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Win32 (MS Windows)",
-    "Environment :: MacOS X",
     "Intended Audience :: Developers",
     "Operating System :: Microsoft :: Windows",
-    "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3.12",
     "Topic :: Communications :: Email",
     "Topic :: Office/Business :: Office Suites",
 ]
 dependencies = [
-    "pywin32>=310; sys_platform == 'win32'",
+    "pywin32>=310",
     "mcp[cli]>=1.26.0,<2",  # 2.x renamed FastMCP to MCPServer; this code targets the 1.x API
 ]
 

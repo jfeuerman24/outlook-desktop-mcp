@@ -3,11 +3,14 @@ Outlook Desktop MCP Server
 ===========================
 Exposes Microsoft Outlook Desktop (Classic) as an MCP server over stdio.
 Uses COM automation — no Microsoft Graph, no Entra app registration.
-Just run this on Windows with Outlook open and you have a full email MCP server.
+Just run this on Windows with Outlook open and you have an email MCP server.
 
-Entry point: python -m outlook_desktop_mcp.server
-Read-only mode: OUTLOOK_MCP_READ_ONLY=1 (or `outlook-desktop-mcp --read-only`) registers
-only tools that read; nothing that can change the mailbox is exposed.
+Nothing here ever sends. ``draft_email``, ``draft_reply`` and ``draft_meeting`` save to
+the Drafts folder (or the calendar, unsent) and optionally open the item in Outlook so the
+user can check it and press Send themselves. Responding to invitations and cancelling
+meetings you organised are not offered, because both would send a message.
+
+Entry point: python -m outlook_desktop_mcp
 """
 import sys
 import json
@@ -21,7 +24,6 @@ from datetime import datetime, timedelta
 
 import os
 
-from outlook_desktop_mcp.readonly import is_read_only
 from outlook_desktop_mcp.tools.calendars import describe_calendars, resolve_calendars
 from outlook_desktop_mcp.tools.conversation import conversation_items
 from outlook_desktop_mcp.utils.addresses import get_smtp, sender_matches
@@ -31,12 +33,9 @@ from outlook_desktop_mcp.tools._folder_constants import (
     OL_MAIL_ITEM,
     OL_APPOINTMENT_ITEM,
     OL_FOLDER_CALENDAR,
+    OL_FOLDER_DRAFTS,
     OL_FOLDER_TASKS,
     OL_MEETING,
-    OL_MEETING_CANCELED,
-    OL_RESPONSE_TENTATIVE,
-    OL_RESPONSE_ACCEPTED,
-    OL_RESPONSE_DECLINED,
     OL_REQUIRED,
     OL_OPTIONAL,
     OL_TASK_ITEM,
@@ -90,8 +89,6 @@ def _check_item_class(item, expected_class: int, label: str) -> str | None:
 
 # --- MCP Server ---
 
-READ_ONLY = is_read_only()
-
 _INSTRUCTIONS_COMMON = (
     "All operations use the locally authenticated Outlook profile — no "
     "Microsoft Graph API, no Entra app registration, no OAuth tokens needed. "
@@ -106,53 +103,30 @@ _INSTRUCTIONS_COMMON = (
     "Dates are ISO 8601 with the local UTC offset.\n\n"
 )
 
-if READ_ONLY:
-    _INSTRUCTIONS = (
-        "This MCP server gives READ-ONLY access to Microsoft Outlook Desktop on "
-        "Windows via COM automation. It can list, search and read emails, "
-        "reconstruct conversations, list every calendar and its events, list tasks, "
-        "and save attachments to disk. It cannot send, reply, move, mark, create, "
-        "update or delete anything — those tools are not registered.\n\n"
-        + _INSTRUCTIONS_COMMON
-        + "AVAILABLE TOOL CATEGORIES:\n"
-        "- Email: list, read, search (with sender filter), get_conversation, attachments\n"
-        "- Calendar: list_calendars, list events, get event, search events\n"
-        "- Tasks: list, get\n"
-        "- Categories, Rules, Out of Office: list / check only\n"
-        "- Folders: list folder hierarchy with item counts"
-    )
-else:
-    _INSTRUCTIONS = (
-        "This MCP server gives you full access to Microsoft Outlook Desktop on "
-        "Windows via COM automation. It can send emails, read inbox messages, "
-        "search across folders, mark messages as read/unread, move messages "
-        "between folders (including archive), reply to emails, and list the "
-        "complete folder hierarchy.\n\n"
-        + _INSTRUCTIONS_COMMON
-        + "AVAILABLE TOOL CATEGORIES:\n"
-        "- Email: send, list, read, search (with sender filter), get_conversation, "
-        "reply, mark read/unread, move, attachments\n"
-        "- Calendar: list_calendars, list events, create appointments/meetings, update, "
-        "delete, respond to invites, search events\n"
-        "- Tasks: create, list, complete, update, delete to-do items\n"
-        "- Categories: list and set color categories on any item\n"
-        "- Rules: list and manage mail rules\n"
-        "- Out of Office: check auto-reply status\n"
-        "- Folders: list folder hierarchy with item counts"
-    )
+_INSTRUCTIONS = (
+    "This MCP server gives access to Microsoft Outlook Desktop on Windows via "
+    "COM automation. It can read, search and organise mail, calendars and "
+    "tasks, and it can WRITE DRAFTS.\n\n"
+    "NOTHING THIS SERVER DOES SENDS A MESSAGE. draft_email, draft_reply and "
+    "draft_meeting save the item (to Drafts, or to the calendar with invitations "
+    "unsent) and by default open it in an Outlook window; the user reads it and "
+    "presses Send themselves. There is no tool to send, to respond to an "
+    "invitation, or to cancel a meeting the user organised, because each of those "
+    "would send. Tell the user where the draft is and that they need to send it.\n\n"
+    + _INSTRUCTIONS_COMMON
+    + "AVAILABLE TOOL CATEGORIES:\n"
+    "- Email: list, read, search (with sender filter), get_conversation, "
+    "draft_email, draft_reply, mark read/unread, move, attachments\n"
+    "- Calendar: list_calendars, list events, create appointments, draft_meeting "
+    "(invitations unsent), update, delete (not organised meetings), search events\n"
+    "- Tasks: create, list, complete, delete to-do items\n"
+    "- Categories: list and set color categories on any item\n"
+    "- Rules: list and enable/disable mail rules\n"
+    "- Out of Office: check auto-reply status\n"
+    "- Folders: list folder hierarchy with item counts"
+)
 
 mcp = FastMCP("outlook-desktop-mcp", instructions=_INSTRUCTIONS)
-
-
-def write_tool():
-    """Register a tool only when the server is not read-only.
-
-    In read-only mode the function is left as a plain coroutine: defined, never exposed.
-    """
-    if READ_ONLY:
-        return lambda func: func
-    return mcp.tool()
-
 
 bridge = OutlookBridge()
 
@@ -325,11 +299,87 @@ async def list_accounts() -> str:
 
 
 # =====================================================================
-# TOOL 1: send_email
+# Drafts: nothing in this server sends
 # =====================================================================
 
-@write_tool()
-async def send_email(
+_DISPID_SEND_USING_ACCOUNT = 64209
+
+
+def _set_sending_account(item, outlook, store) -> None:
+    """Point a new item at the account whose delivery store is ``store`` (SendUsingAccount).
+
+    pywin32 cannot assign this property directly, hence the raw Invoke with its dispid.
+    """
+    for acc in outlook.Session.Accounts:
+        try:
+            if acc.DeliveryStore.StoreID == store.StoreID:
+                item._oleobj_.Invoke(*(_DISPID_SEND_USING_ACCOUNT, 0, 8, 0, acc))
+                return
+        except Exception:
+            continue
+
+
+def _safe_get(getter, default=None):
+    try:
+        return getter()
+    except Exception:
+        return default
+
+
+def _write_draft_text(item, body: str, html_body: str = "") -> None:
+    """Put the text at the top of a draft, above whatever Outlook already put there.
+
+    Touching ``GetInspector`` makes Outlook fill a new item exactly as it would when its
+    window opens: the user's signature on a new message, the quoted history on a reply.
+    The text is then injected inside <body> so it sits above both.
+    """
+    try:
+        item.GetInspector
+    except Exception:
+        pass
+    if plain_text_mode():
+        existing = str(_safe_get(lambda: item.Body) or "")
+        item.Body = body + ("\n\n" + existing if existing.strip() else "")
+        return
+    fragment = style_html(html_body) if html_body else text_to_html(body)
+    item.HTMLBody = inject_into_body(str(_safe_get(lambda: item.HTMLBody) or ""), fragment)
+
+
+def _save_draft(item, kind: str, open_in_outlook: bool, **extra) -> str:
+    """Save ``item`` without sending, optionally open it in Outlook, describe the result."""
+    item.Save()
+    opened = False
+    if open_in_outlook:
+        try:
+            item.Display()
+            opened = True
+        except Exception as e:
+            logger.warning("Draft saved but could not be opened in Outlook: %s", e)
+    try:
+        raw = str(item.Parent.FolderPath).lstrip("\\")
+        parts = [p for p in raw.split("\\") if p]
+        folder = "/".join(parts[1:]) if len(parts) > 1 else (parts[0] if parts else "")
+    except Exception:
+        folder = ""
+    return json.dumps({
+        "status": "draft_saved",
+        "kind": kind,
+        "sent": False,
+        "subject": str(_safe_get(lambda: item.Subject) or ""),
+        "entry_id": str(_safe_get(lambda: item.EntryID) or ""),
+        "folder": folder,
+        "opened_in_outlook": opened,
+        "note": "Nothing has been sent. The user must open the draft in Outlook, check it and press Send.",
+        **extra,
+    }, indent=2, default=str)
+
+
+# =====================================================================
+# TOOL 1: draft_email
+# =====================================================================
+
+@mcp.tool()
+async def draft_email(
     to: str,
     subject: str,
     body: str,
@@ -337,14 +387,16 @@ async def send_email(
     bcc: str = "",
     html_body: str = "",
     account: str = "",
+    open_in_outlook: bool = True,
 ) -> str:
-    """Send an email using the user's Outlook account.
+    """Write a new email to the Drafts folder. It is NOT sent.
 
-    Creates and sends an email immediately through the default Outlook profile.
-    The email will appear in the user's Sent Items folder after sending. The
-    message is sent as HTML in the user's default font (Aptos 12 pt black unless
-    the OUTLOOK_MCP_FONT_* environment variables say otherwise); the plain-text
-    body is rendered into paragraphs, so write it as normal prose.
+    The draft is saved in the chosen account's Drafts folder, with the user's
+    signature below the text, and by default opened in an Outlook window so the
+    user can read it and press Send themselves. The text is written as HTML in
+    the user's default font (Aptos 12 pt black unless the OUTLOOK_MCP_FONT_*
+    environment variables say otherwise); write the body as normal prose with
+    blank lines between paragraphs.
 
     Args:
         to: One or more recipient email addresses, separated by semicolons.
@@ -355,38 +407,33 @@ async def send_email(
         bcc: Optional. BCC recipients, separated by semicolons.
         html_body: Optional. HTML-formatted body, used instead of 'body' and
             wrapped in the default font so unstyled text matches.
-        account: Optional. Account display name (or substring) to send from.
-            Default: primary account. Use list_accounts to see available accounts.
+        account: Optional. Account display name (or substring) the draft belongs
+            to and will be sent from. Default: primary account. Use list_accounts
+            to see available accounts.
+        open_in_outlook: If true (default), open the draft in an Outlook window
+            right away. Set false when preparing several drafts at once.
 
     Returns:
-        A confirmation message with subject and recipients, or an error.
+        JSON with status "draft_saved", sent=false, entry_id, folder and whether
+        it was opened in Outlook. Tell the user the draft is waiting for them.
     """
-    def _send(outlook, namespace, to, subject, body, cc, bcc, html_body, account):
+    def _draft(outlook, namespace, to, subject, body, cc, bcc, html_body, account, open_in_outlook):
         store = _require_store(namespace, account)
-        mail = outlook.CreateItem(OL_MAIL_ITEM)
-        # Set the sending account
-        for acc in outlook.Session.Accounts:
-            if acc.DeliveryStore.StoreID == store.StoreID:
-                mail._oleobj_.Invoke(*(64209, 0, 8, 0, acc))  # SendUsingAccount
-                break
+        mail = store.GetDefaultFolder(OL_FOLDER_DRAFTS).Items.Add(OL_MAIL_ITEM)
+        _set_sending_account(mail, outlook, store)
         mail.To = to
-        mail.Subject = subject
-        mail.Body = body
         if cc:
             mail.CC = cc
         if bcc:
             mail.BCC = bcc
-        if html_body:
-            mail.HTMLBody = style_html(html_body)
-        elif not plain_text_mode():
-            mail.HTMLBody = text_to_html(body)
-        mail.Send()
-        return f"Email sent: '{subject}' to {to}"
+        mail.Subject = subject
+        _write_draft_text(mail, body, html_body)
+        return _save_draft(mail, "email", open_in_outlook, to=to, cc=cc, bcc=bcc)
 
     try:
-        return await bridge.call(_send, to, subject, body, cc, bcc, html_body, account)
+        return await bridge.call(_draft, to, subject, body, cc, bcc, html_body, account, open_in_outlook)
     except Exception as e:
-        return f"Error sending email: {format_com_error(e)}"
+        return f"Error writing draft: {format_com_error(e)}"
 
 
 # =====================================================================
@@ -440,7 +487,7 @@ async def list_emails(
 
     Use the entry_id from results to read full content with read_email,
     get_conversation for the whole thread, or actions like mark_as_read,
-    move_email, or reply_email.
+    move_email, or draft_reply.
 
     Args:
         folder: The folder to list. Case-insensitive names: "inbox" (default),
@@ -643,7 +690,7 @@ async def get_conversation(
 # TOOL 4: mark_as_read
 # =====================================================================
 
-@write_tool()
+@mcp.tool()
 async def mark_as_read(entry_id: str, account: str = "") -> str:
     """Mark a specific email as read in Outlook.
 
@@ -682,7 +729,7 @@ async def mark_as_read(entry_id: str, account: str = "") -> str:
 # TOOL 5: mark_as_unread
 # =====================================================================
 
-@write_tool()
+@mcp.tool()
 async def mark_as_unread(entry_id: str, account: str = "") -> str:
     """Mark a specific email as unread in Outlook.
 
@@ -721,7 +768,7 @@ async def mark_as_unread(entry_id: str, account: str = "") -> str:
 # TOOL 6: move_email
 # =====================================================================
 
-@write_tool()
+@mcp.tool()
 async def move_email(
     entry_id: str,
     target_folder: str = "archive",
@@ -765,36 +812,39 @@ async def move_email(
 
 
 # =====================================================================
-# TOOL 7: reply_email
+# TOOL 7: draft_reply
 # =====================================================================
 
-@write_tool()
-async def reply_email(
+@mcp.tool()
+async def draft_reply(
     entry_id: str,
     body: str,
     reply_all: bool = False,
     account: str = "",
+    open_in_outlook: bool = True,
 ) -> str:
-    """Reply to an email in Outlook.
+    """Write a reply to an email as a draft. It is NOT sent.
 
-    Creates and sends a reply, preserving the original message thread (Outlook's
-    quoted history stays below). The reply text is inserted as HTML in the user's
-    default font (Aptos 12 pt black unless OUTLOOK_MCP_FONT_* says otherwise).
-    Use reply_all=True to reply to all recipients (sender + CC list).
+    Creates Outlook's normal reply (recipients filled in, quoted history and
+    signature below), puts the text above it in the user's default font, saves
+    it to Drafts, and by default opens it in an Outlook window so the user can
+    read it and press Send themselves.
 
     Args:
         entry_id: The unique Outlook EntryID of the email to reply to.
-        body: The reply message text, as plain prose; blank lines separate
-            paragraphs. Placed above the original message in the thread.
-        reply_all: If true, reply to all recipients (sender + all CC/To).
-            If false (default), reply only to the sender.
+        body: The reply text, as plain prose; blank lines separate paragraphs.
+        reply_all: If true, address everyone on the original (sender + To/CC).
+            If false (default), address only the sender.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
+        open_in_outlook: If true (default), open the draft in an Outlook window
+            right away. Set false when preparing several drafts at once.
 
     Returns:
-        Confirmation indicating the reply was sent, or an error.
+        JSON with status "draft_saved", sent=false, entry_id of the draft and
+        the folder it is in. Tell the user the draft is waiting for them.
     """
-    def _reply(outlook, namespace, entry_id, body, reply_all, account):
+    def _reply(outlook, namespace, entry_id, body, reply_all, account, open_in_outlook):
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
@@ -802,20 +852,18 @@ async def reply_email(
             item = namespace.GetItemFromID(entry_id)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
             return err
-        subject = item.Subject
         reply_item = item.ReplyAll() if reply_all else item.Reply()
-        if plain_text_mode():
-            reply_item.Body = body + "\n\n" + reply_item.Body
-        else:
-            # Inject inside <body> so Outlook's reply template can't restyle it (see utils/html.py)
-            reply_item.HTMLBody = inject_into_body(reply_item.HTMLBody, text_to_html(body))
-        reply_item.Send()
-        return f"Reply sent to '{subject}' (reply_all={reply_all})"
+        _write_draft_text(reply_item, body)
+        return _save_draft(
+            reply_item, "reply_all" if reply_all else "reply", open_in_outlook,
+            in_reply_to=str(item.Subject or ""), to=str(_safe_get(lambda: reply_item.To) or ""),
+            cc=str(_safe_get(lambda: reply_item.CC) or ""),
+        )
 
     try:
-        return await bridge.call(_reply, entry_id, body, reply_all, account)
+        return await bridge.call(_reply, entry_id, body, reply_all, account, open_in_outlook)
     except Exception as e:
-        return f"Error replying to email: {format_com_error(e)}"
+        return f"Error writing reply draft: {format_com_error(e)}"
 
 
 # =====================================================================
@@ -1096,8 +1144,9 @@ async def list_events(
     To check availability across several calendars, call with calendar="all"
     (or once per account) and look for gaps.
 
-    Use entry_id from results with get_event, update_event, delete_event,
-    or respond_to_meeting.
+    Use entry_id from results with get_event, update_event or delete_event.
+    Invitations cannot be accepted or declined through this server; the
+    user does that in Outlook.
 
     Args:
         start_date: Start of date range in ISO 8601 format (e.g. "2026-02-25"
@@ -1106,7 +1155,7 @@ async def list_events(
         count: Maximum number of events to return. Default 20, max 200.
         calendar: Optional. "" (default) = the account's main Calendar; "all" =
             every calendar in the account; otherwise a calendar name or path
-            from list_calendars (e.g. "Birthdays" or "Calendar/Kate Work").
+            from list_calendars (e.g. "Birthdays" or "Calendar/Family").
         account: Optional. Account display name (or substring) to target.
             Default: primary account. Use list_accounts to see available accounts.
 
@@ -1165,7 +1214,7 @@ async def get_event(entry_id: str, account: str = "") -> str:
 # TOOL 12: create_event
 # =====================================================================
 
-@write_tool()
+@mcp.tool()
 async def create_event(
     subject: str,
     start: str,
@@ -1179,8 +1228,8 @@ async def create_event(
     """Create a personal calendar appointment (no attendees).
 
     Creates and saves an appointment on the user's calendar. This is a
-    personal event — no meeting invitations are sent. Use create_meeting
-    instead if you need to invite attendees.
+    personal event with no attendees. Use draft_meeting instead if you need
+    to invite people (the invitations are prepared, not sent).
 
     Args:
         subject: The event title.
@@ -1242,11 +1291,11 @@ async def create_event(
 
 
 # =====================================================================
-# TOOL 13: create_meeting
+# TOOL 13: draft_meeting
 # =====================================================================
 
-@write_tool()
-async def create_meeting(
+@mcp.tool()
+async def draft_meeting(
     subject: str,
     start: str,
     end: str,
@@ -1255,13 +1304,14 @@ async def create_meeting(
     body: str = "",
     optional_attendees: str = "",
     account: str = "",
+    open_in_outlook: bool = True,
 ) -> str:
-    """Create a meeting and send invitations to attendees.
+    """Prepare a meeting with attendees on the calendar. Invitations are NOT sent.
 
-    Creates a calendar meeting and immediately sends meeting requests to
-    all specified attendees. The meeting will appear on the organizer's
-    calendar and attendees will receive an invitation they can accept,
-    decline, or tentatively accept.
+    The meeting is saved on the user's calendar with the attendees filled in
+    and invitations unsent (Outlook marks it "invitations have not been sent"),
+    and by default opened in an Outlook window so the user can check it and
+    press Send themselves.
 
     Args:
         subject: The meeting title.
@@ -1273,22 +1323,22 @@ async def create_meeting(
         body: Optional. Meeting description or agenda.
         optional_attendees: Optional. Optional attendee emails, separated
             by semicolons.
-        account: Optional. Account display name (or substring) to send from.
-            Default: primary account. Use list_accounts to see available accounts.
+        account: Optional. Account display name (or substring) whose calendar
+            the meeting goes on and which it will be sent from. Default: primary
+            account. Use list_accounts to see available accounts.
+        open_in_outlook: If true (default), open the meeting in an Outlook
+            window right away.
 
     Returns:
-        Confirmation that the meeting was created and invitations sent.
+        JSON with status "draft_saved", sent=false, entry_id and the calendar
+        folder. Tell the user the invitation is waiting for them to send.
     """
-    def _create(outlook, namespace, subject, start, end, required_attendees,
-                location, body, optional_attendees, account):
-        appt = outlook.CreateItem(OL_APPOINTMENT_ITEM)
-        # Set sending account
+    def _draft(outlook, namespace, subject, start, end, required_attendees,
+               location, body, optional_attendees, account, open_in_outlook):
+        store = _require_store(namespace, account)
+        appt = store.GetDefaultFolder(OL_FOLDER_CALENDAR).Items.Add(OL_APPOINTMENT_ITEM)
         if account:
-            store = _require_store(namespace, account)
-            for acc in outlook.Session.Accounts:
-                if acc.DeliveryStore.StoreID == store.StoreID:
-                    appt._oleobj_.Invoke(*(64209, 0, 8, 0, acc))
-                    break
+            _set_sending_account(appt, outlook, store)
         appt.Subject = subject
         appt.Start = start
         appt.End = end
@@ -1312,26 +1362,26 @@ async def create_meeting(
                     recip.Type = OL_OPTIONAL
 
         appt.Recipients.ResolveAll()
-        appt.Send()
-        return (
-            f"Meeting '{subject}' created and invitations sent to "
-            f"{required_attendees}"
+        return _save_draft(
+            appt, "meeting", open_in_outlook,
+            start=str(appt.Start), end=str(appt.End),
+            required_attendees=required_attendees, optional_attendees=optional_attendees,
         )
 
     try:
         return await bridge.call(
-            _create, subject, start, end, required_attendees, location, body,
-            optional_attendees, account,
+            _draft, subject, start, end, required_attendees, location, body,
+            optional_attendees, account, open_in_outlook,
         )
     except Exception as e:
-        return f"Error creating meeting: {format_com_error(e)}"
+        return f"Error preparing meeting: {format_com_error(e)}"
 
 
 # =====================================================================
 # TOOL 14: update_event
 # =====================================================================
 
-@write_tool()
+@mcp.tool()
 async def update_event(
     entry_id: str,
     subject: str = "",
@@ -1344,8 +1394,9 @@ async def update_event(
     """Update an existing calendar event.
 
     Modifies properties of an appointment or meeting. Only the fields you
-    provide will be updated — omitted fields remain unchanged. For meetings
-    you organize, attendees will receive an update notification.
+    provide will be updated — omitted fields remain unchanged. The change is
+    saved, not sent: for a meeting the user organises, attendees are not
+    notified until the user opens it in Outlook and presses Send Update.
 
     Args:
         entry_id: The unique Outlook EntryID of the event to update.
@@ -1400,17 +1451,18 @@ async def update_event(
 # TOOL 15: delete_event
 # =====================================================================
 
-@write_tool()
+@mcp.tool()
 async def delete_event(entry_id: str, account: str = "") -> str:
-    """Delete a calendar event or cancel a meeting.
+    """Delete a personal appointment or a received meeting from the calendar.
 
-    For personal appointments, the event is simply deleted. For meetings
-    you organized, this cancels the meeting and sends cancellation notices
-    to all attendees. For meetings you received, this declines and removes
-    the event from your calendar.
+    Nothing is sent. Meetings the user organises (including unsent ones made
+    with draft_meeting) are refused, because cancelling them would send
+    notices to the attendees; the user cancels or discards those in Outlook.
+    Deleting a received meeting removes it from the calendar without sending
+    a response to the organiser.
 
     Args:
-        entry_id: The unique Outlook EntryID of the event to delete/cancel.
+        entry_id: The unique Outlook EntryID of the event to delete.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
 
@@ -1426,15 +1478,14 @@ async def delete_event(entry_id: str, account: str = "") -> str:
         if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
             return err
         subject = item.Subject
-        meeting_status = item.MeetingStatus
 
-        # If this is a meeting we organized, cancel it (sends notices)
-        if meeting_status == OL_MEETING:
-            item.MeetingStatus = OL_MEETING_CANCELED
-            item.Send()
-            return f"Meeting canceled: '{subject}' (cancellation sent to attendees)"
+        if item.MeetingStatus == OL_MEETING:
+            return (
+                f"Error: '{subject}' is a meeting the user organises. Deleting it would send "
+                "cancellation notices, which this server never does. Ask the user to cancel "
+                "or discard it in Outlook."
+            )
 
-        # Otherwise just delete
         item.Delete()
         return f"Event deleted: '{subject}'"
 
@@ -1444,62 +1495,12 @@ async def delete_event(entry_id: str, account: str = "") -> str:
         return f"Error deleting event: {format_com_error(e)}"
 
 
-# =====================================================================
-# TOOL 16: respond_to_meeting
-# =====================================================================
-
-@write_tool()
-async def respond_to_meeting(
-    entry_id: str,
-    response: str,
-    account: str = "",
-) -> str:
-    """Respond to a meeting invitation (accept, decline, or tentative).
-
-    Sends your response to the meeting organizer. The meeting will be
-    added to (or updated on) your calendar accordingly.
-
-    Args:
-        entry_id: The unique Outlook EntryID of the meeting to respond to.
-            Get this from list_events or search_events.
-        response: Your response. Must be one of: "accept", "decline",
-            or "tentative".
-        account: Optional. Account display name (or substring). Only needed
-            if entry_id is ambiguous across stores.
-
-    Returns:
-        Confirmation of your response, or an error.
-    """
-    def _respond(outlook, namespace, entry_id, response, account):
-        response_map = {
-            "accept": OL_RESPONSE_ACCEPTED,
-            "decline": OL_RESPONSE_DECLINED,
-            "tentative": OL_RESPONSE_TENTATIVE,
-        }
-        response_lower = response.lower().strip()
-        if response_lower not in response_map:
-            return f"Error: response must be 'accept', 'decline', or 'tentative'. Got: '{response}'"
-
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
-        if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
-            return err
-        subject = item.Subject
-        response_item = item.Respond(response_map[response_lower])
-        response_item.Send()
-        return f"Responded '{response_lower}' to meeting: '{subject}'"
-
-    try:
-        return await bridge.call(_respond, entry_id, response, account)
-    except Exception as e:
-        return f"Error responding to meeting: {format_com_error(e)}"
+# (There is deliberately no respond_to_meeting: accepting or declining an
+#  invitation sends a message to the organiser, and this server never sends.)
 
 
 # =====================================================================
-# TOOL 17: search_events
+# TOOL 16: search_events
 # =====================================================================
 
 @mcp.tool()
@@ -1623,7 +1624,7 @@ async def get_task(entry_id: str, account: str = "") -> str:
         return f"Error reading task: {format_com_error(e)}"
 
 
-@write_tool()
+@mcp.tool()
 async def create_task(
     subject: str,
     body: str = "",
@@ -1685,7 +1686,7 @@ async def create_task(
         return f"Error creating task: {format_com_error(e)}"
 
 
-@write_tool()
+@mcp.tool()
 async def complete_task(entry_id: str, account: str = "") -> str:
     """Mark a task as complete.
 
@@ -1718,7 +1719,7 @@ async def complete_task(entry_id: str, account: str = "") -> str:
         return f"Error completing task: {format_com_error(e)}"
 
 
-@write_tool()
+@mcp.tool()
 async def delete_task(entry_id: str, account: str = "") -> str:
     """Delete a task from Outlook.
 
@@ -1885,7 +1886,7 @@ async def list_categories(account: str = "") -> str:
         return f"Error listing categories: {format_com_error(e)}"
 
 
-@write_tool()
+@mcp.tool()
 async def set_category(
     entry_id: str,
     categories: str,
@@ -1962,7 +1963,7 @@ async def list_rules(account: str = "") -> str:
         return f"Error listing rules: {format_com_error(e)}"
 
 
-@write_tool()
+@mcp.tool()
 async def toggle_rule(
     rule_name: str,
     enabled: bool,
@@ -2048,7 +2049,7 @@ async def get_out_of_office(account: str = "") -> str:
 # =====================================================================
 
 def main():
-    logger.info("Starting Outlook Desktop MCP server%s...", " (read-only)" if READ_ONLY else "")
+    logger.info("Starting Outlook Desktop MCP server...")
     bridge.start()
     logger.info("COM bridge ready. Starting MCP stdio transport...")
     try:

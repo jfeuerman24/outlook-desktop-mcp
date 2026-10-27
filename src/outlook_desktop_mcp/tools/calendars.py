@@ -77,8 +77,8 @@ def resolve_calendars(store, calendar: str = "") -> list[tuple[str, object]]:
     """Folders for a tool's ``calendar`` argument.
 
     "" → the default Calendar; "all" or "*" → every calendar in the store; otherwise a
-    case-insensitive match on the calendar's path (``Calendar/Kate Work``) or name
-    (``Kate Work``). Raises ``ValueError`` when nothing matches.
+    case-insensitive match on the calendar's path (``Calendar/Family``) or name
+    (``Family``). Raises ``ValueError`` when nothing matches.
     """
     wanted = (calendar or "").strip()
     if not wanted:
