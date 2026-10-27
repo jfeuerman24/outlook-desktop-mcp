@@ -42,6 +42,9 @@ returns the thread on its own. The one-call form the instructions now steer to,
 - Server instructions: a company, deal or project name is a subject search, never
   `contact_history`; start in the default account; use one spelling and widen rather than
   trying variants; at most one confirming call once the answer is in hand.
+- Docs checked against the running server: README badges no longer point at upstream's PyPI
+  package; the register-from-source command matches SETUP.md; CLAUDE.md and SETUP.md say the
+  installer adds Git when missing; CONTRIBUTING.md describes the workflows that actually run.
 
 ## 0.7.0 - 2026-10-27
 

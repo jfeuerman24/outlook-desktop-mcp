@@ -2,8 +2,9 @@
 
 This is a fork of [Aanerud/outlook-desktop-mcp](https://github.com/Aanerud/outlook-desktop-mcp)
 (AGPL-3.0). `main` is the branch people install from: the README's setup clones it, and
-"update it" pulls it. There is no release pipeline; a push to `main` is a release, so keep
-`main` working.
+"update it" pulls it. A push to `main` is therefore a release, so keep `main` working. The
+offline unit tests run in GitHub Actions on every push (`.github/workflows/tests.yml`); the
+PyPI workflow is manual-only and this fork does not publish there.
 
 ## Working on it
 

@@ -1,8 +1,8 @@
 # outlook-desktop-mcp
 
-[![PyPI](https://img.shields.io/pypi/v/outlook-desktop-mcp)](https://pypi.org/project/outlook-desktop-mcp/)
-[![Python](https://img.shields.io/pypi/pyversions/outlook-desktop-mcp)](https://pypi.org/project/outlook-desktop-mcp/)
+[![Unit tests](https://github.com/jfeuerman24/outlook-desktop-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/jfeuerman24/outlook-desktop-mcp/actions/workflows/tests.yml)
 [![Platform](https://img.shields.io/badge/platform-Windows-blue)]()
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue)]()
 
 **Lets Claude use the Outlook that is already open on your Windows PC.**
 
@@ -66,6 +66,9 @@ you how to add it.
    the system tray and open it again**. That is the only thing you do yourself. Come back to
    the folder and say **"test it"**.
 
+If Claude says Git is not installed, tell it to download the ZIP from GitHub and unzip it into
+the folder instead; the rest is the same, and the installer adds Git for later updates.
+
 The first time Claude touches Outlook, Outlook asks whether to allow it. Tick **Allow access
 for**, pick **10 minutes**, and carry on; see [the security prompt](#outlook-programmatic-access-security-prompts)
 for the permanent options.
@@ -112,7 +115,7 @@ restart Claude, and delete the folder.
 | **Every calendar, not just the default.** `list_calendars`; `list_events` and `search_events` take `calendar` (`""`, `"all"`, or a name/path). | `tools/calendars.py` |
 | **Thread reconstruction.** `get_conversation` walks Outlook's conversation across folders and dates, deduped by Message-ID, oldest first. | `tools/conversation.py` |
 | **Quoted history trimmed, Exchange addresses resolved, ISO dates.** `read_email` returns the message's own text; senders inside your own organisation come back as real addresses; dates carry the local UTC offset. | `utils/text.py`, `utils/addresses.py`, `utils/dates.py` |
-| **Offline unit tests** (`python -m unittest discover -s tests`) and a GitHub Actions workflow that runs them. | `tests/test_*.py` |
+| **Offline unit tests** (`python -m unittest discover -s tests`) and a GitHub Actions workflow that runs them on every push. Publishing to PyPI is manual-only and unused; `main` is what people install and update from. | `tests/test_*.py`, `.github/workflows/` |
 
 ## Requirements
 
@@ -359,10 +362,11 @@ pip install pywin32 "mcp[cli]" -e .
 python .venv\Scripts\pywin32_postinstall.py -install
 ```
 
-Register from source using the launcher script:
+Register with Claude Code (the desktop app is registered by `install.ps1` or by hand as in
+[SETUP.md](SETUP.md)):
 
 ```bash
-claude mcp add outlook-desktop -- powershell.exe -Command "& 'C:\path\to\outlook-desktop-mcp\outlook-desktop-mcp.cmd' mcp"
+claude mcp add --scope user outlook-desktop -- C:\path\to\outlook-desktop-mcp\.venv\Scripts\outlook-desktop-mcp.exe
 ```
 
 ### Windows (ARM64)

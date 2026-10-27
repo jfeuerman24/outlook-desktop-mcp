@@ -20,7 +20,7 @@ in step 1 is shared; steps 2 and 3 just tell each app where it is.
 | Windows 10/11 with **classic Outlook** installed and signed in | The "New Outlook" toggle (top right of Outlook) must be **off**. The new Outlook has no automation interface. |
 | **Python 3.12 or newer** | Open PowerShell and run `python --version`. If it is missing or older, install from https://www.python.org/downloads/windows/ and tick **"Add python.exe to PATH"** in the installer. |
 | **Claude Code** and the **Claude desktop app**, signed in | Claude Code: https://claude.com/claude-code; it needs a paid plan (Pro, Max, Team or Enterprise). Desktop app: https://claude.ai/download or the Microsoft Store. The desktop app registers local MCP servers through the **Developer** section of its Settings; if your app has no such section, this version or plan of the app does not offer them. |
-| **Git** (optional) | Only to clone. You can also download the repo as a zip from GitHub and unzip it. |
+| **Git** (optional) | To clone, and later to update with `git pull`. You can also download the repo as a ZIP from GitHub and unzip it; `install.ps1` installs Git if it is missing. |
 
 ## 1. Get the code and install it (once)
 
