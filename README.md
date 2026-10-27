@@ -96,6 +96,7 @@ You have three options:
 | `list_folders` | Browse the folder hierarchy with item counts |
 | `draft_email` | Write a new email to Drafts with To/CC/BCC and open it in Outlook. **Not sent.** |
 | `draft_reply` | Write a reply or reply-all above the quoted thread, save to Drafts, open in Outlook. **Not sent.** |
+| `draft_forward` | Forward an email with Outlook's own Forward() (FW: subject, header block, quoted message, attachments), your note above it, saved to Drafts. Can forward the newest message of the thread and pull in attachments from earlier messages. **Not sent.** |
 | `mark_as_read` | Mark a specific email as read |
 | `mark_as_unread` | Mark a specific email as unread |
 | `move_email` | Move an email to Archive, Trash, or any folder |
@@ -141,14 +142,15 @@ You have three options:
 | `toggle_rule` | Enable or disable a mail rule by name |
 | `get_out_of_office` | Check whether Out of Office auto-reply is on or off |
 
-**Total: 31 tools.**
+**Total: 32 tools.**
 
 ### Nothing sends
 
-The three tools that would normally send instead save and hand over to you:
+The four tools that would normally send instead save and hand over to you:
 
 - `draft_email` writes a new message to the Drafts folder of the chosen account.
 - `draft_reply` builds Outlook's own reply or reply-all (recipients, quoted thread, signature) and puts the text above it.
+- `draft_forward` builds Outlook's own forward (FW: subject, header block, quoted message, attachments) and puts your note above it.
 - `draft_meeting` puts the meeting on your calendar with the attendees filled in and the invitations unsent.
 
 Each one saves the item so you can open it, read it and press **Send**; with
@@ -280,7 +282,7 @@ Once registered, just talk to Claude naturally:
 outlook-desktop-mcp/
   src/outlook_desktop_mcp/
     entrypoint.py            # Windows check → server
-    server.py                # The MCP server (31 tools, COM automation, drafts only)
+    server.py                # The MCP server (32 tools, COM automation, drafts only)
     com_bridge.py            # Async-to-COM threading bridge
     tools/
       _folder_constants.py   # Outlook enums and constants

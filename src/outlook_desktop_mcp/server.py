@@ -23,6 +23,8 @@ from outlook_desktop_mcp.com_bridge import OutlookBridge
 from datetime import datetime, timedelta
 
 import os
+import shutil
+import tempfile
 
 from outlook_desktop_mcp.tools.calendars import describe_calendars, resolve_calendars
 from outlook_desktop_mcp.tools.conversation import conversation_items
@@ -893,6 +895,191 @@ async def draft_reply(
         return await bridge.call(_reply, entry_id, body, reply_all, account, open_in_outlook)
     except Exception as e:
         return f"Error writing reply draft: {format_com_error(e)}"
+
+
+# =====================================================================
+# TOOL 7b: draft_forward
+# =====================================================================
+
+# MAPI properties that mark an attachment as inline (a picture pasted in the body).
+_PR_ATTACH_CONTENT_ID = "http://schemas.microsoft.com/mapi/proptag/0x3712001F"
+_PR_ATTACHMENT_HIDDEN = "http://schemas.microsoft.com/mapi/proptag/0x7FFE000B"
+_OL_ATTACH_OLE = 6
+
+
+def _is_inline_attachment(att) -> bool:
+    """True for pictures embedded in the message body and OLE objects, which are not
+    files the reader would want re-attached to a forward."""
+    try:
+        if int(att.Type) == _OL_ATTACH_OLE:
+            return True
+    except Exception:
+        pass
+    try:
+        if att.PropertyAccessor.GetProperty(_PR_ATTACHMENT_HIDDEN):
+            return True
+    except Exception:
+        pass
+    try:
+        if str(att.PropertyAccessor.GetProperty(_PR_ATTACH_CONTENT_ID) or "").strip():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _attachment_key(att) -> tuple[str, int]:
+    return (str(_safe_get(lambda: att.FileName) or "").lower(), int(_safe_get(lambda: att.Size, 0) or 0))
+
+
+@mcp.tool()
+async def draft_forward(
+    entry_id: str,
+    to: str,
+    body: str,
+    cc: str = "",
+    bcc: str = "",
+    account: str = "",
+    forward_latest_in_thread: bool = True,
+    include_thread_attachments: bool = False,
+    open_in_outlook: bool | None = None,
+) -> str:
+    """Forward an email as a draft. It is NOT sent.
+
+    BEFORE CALLING THIS: show the complete draft in the chat first (recipients,
+    which message is being forwarded, the full note that goes above it, and
+    which attachments will ride along) and work on it there until the user is
+    happy. Then ask explicitly, as its own question, whether to put it in
+    Outlook, and call this tool only after the user says yes. Never call it as
+    the first step of a "forward this" request. The user wants to see and edit
+    drafts in the conversation, not discover them in Outlook.
+
+    Uses Outlook's own Forward(), so the "FW:" subject, the From/Sent/To/Subject
+    header block, the quoted message and its attachments carry over exactly as
+    a manual forward would. The note is placed above all of that in the user's
+    default font, with the signature handled the same way as a reply. The
+    result is saved to Drafts (opened in a window only if the
+    OUTLOOK_MCP_OPEN_DRAFTS setting or open_in_outlook says so).
+
+    Attachments come only from the message being forwarded unless
+    include_thread_attachments is set.
+
+    Args:
+        entry_id: EntryID of the email to forward (from list_emails,
+            search_emails, read_email or get_conversation).
+        to: Recipient email addresses, separated by semicolons.
+        body: The note to put above the forwarded message, as plain prose;
+            blank lines separate paragraphs.
+        cc: Optional. CC recipients, separated by semicolons.
+        bcc: Optional. BCC recipients, separated by semicolons.
+        account: Optional. Account display name (or substring). Only needed
+            if entry_id is ambiguous across stores.
+        forward_latest_in_thread: If true (default) and entry_id is not the
+            newest message in its conversation, the newest message is forwarded
+            instead so the whole chain goes. The result says which message was
+            actually forwarded. Set false to forward exactly the given message.
+        include_thread_attachments: If true, attachments from the earlier
+            messages in the same conversation are added to the forward too,
+            skipping duplicates (same filename and size) and inline pictures.
+            Default false.
+        open_in_outlook: Optional. True also opens the draft in an Outlook
+            window; false only saves it to Drafts. Leave unset to follow the
+            OUTLOOK_MCP_OPEN_DRAFTS setting (default: only save).
+
+    Returns:
+        JSON with status "draft_saved", sent=false, entry_id of the draft, its
+        folder, opened_in_outlook, forwarded_entry_id and forwarded_subject
+        (the message actually forwarded), forwarded_is_latest, and
+        attachments_added (those pulled in from earlier messages). Tell the
+        user where the draft is.
+    """
+    def _forward(outlook, namespace, entry_id, to, body, cc, bcc, account,
+                 forward_latest_in_thread, include_thread_attachments, open_in_outlook):
+        if account:
+            store = _require_store(namespace, account)
+            item = namespace.GetItemFromID(entry_id, store.StoreID)
+        else:
+            item = namespace.GetItemFromID(entry_id)
+            store = _safe_get(lambda: item.Parent.Store) or _require_store(namespace, "")
+        if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
+            return err
+
+        thread: list = []
+        if forward_latest_in_thread or include_thread_attachments:
+            thread, _source = conversation_items(store, item, limit=200)  # oldest -> newest
+
+        source = item
+        if forward_latest_in_thread and thread:
+            newest = thread[-1][1]
+            if str(_safe_get(lambda: newest.EntryID) or "") != str(item.EntryID):
+                source = newest
+
+        fwd = source.Forward()
+        fwd.To = to
+        if cc:
+            fwd.CC = cc
+        if bcc:
+            fwd.BCC = bcc
+
+        attachments_added: list = []
+        tmpdir = None
+        if include_thread_attachments and thread:
+            seen = set()
+            for i in range(int(_safe_get(lambda: fwd.Attachments.Count, 0) or 0)):
+                seen.add(_attachment_key(fwd.Attachments.Item(i + 1)))
+            tmpdir = tempfile.mkdtemp(prefix="outlook-mcp-fwd-")
+            source_id = str(_safe_get(lambda: source.EntryID) or "")
+            for _path, node in thread:
+                if str(_safe_get(lambda: node.EntryID) or "") == source_id:
+                    continue
+                for i in range(int(_safe_get(lambda: node.Attachments.Count, 0) or 0)):
+                    att = node.Attachments.Item(i + 1)
+                    if _is_inline_attachment(att):
+                        continue
+                    key = _attachment_key(att)
+                    if not key[0] or key in seen:
+                        continue
+                    target = os.path.join(tmpdir, f"{len(attachments_added) + 1:02d}_{key[0]}")
+                    try:
+                        att.SaveAsFile(target)
+                        added = fwd.Attachments.Add(target)
+                        try:
+                            added.DisplayName = str(att.FileName)
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        logger.warning("Could not carry attachment %s: %s", key[0], e)
+                        continue
+                    seen.add(key)
+                    attachments_added.append({
+                        "filename": str(att.FileName),
+                        "size": key[1],
+                        "from_subject": str(_safe_get(lambda: node.Subject) or ""),
+                        "from_entry_id": str(_safe_get(lambda: node.EntryID) or ""),
+                    })
+
+        _write_draft_text(fwd, body)
+        try:
+            return _save_draft(
+                fwd, "forward", open_in_outlook,
+                forwarded_entry_id=str(_safe_get(lambda: source.EntryID) or ""),
+                forwarded_subject=str(_safe_get(lambda: source.Subject) or ""),
+                forwarded_is_latest=(not thread) or source is thread[-1][1] or
+                    str(_safe_get(lambda: source.EntryID) or "") == str(_safe_get(lambda: thread[-1][1].EntryID) or ""),
+                to=str(_safe_get(lambda: fwd.To) or ""), cc=str(_safe_get(lambda: fwd.CC) or ""),
+                attachments_added=attachments_added,
+            )
+        finally:
+            if tmpdir:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+    try:
+        return await bridge.call(
+            _forward, entry_id, to, body, cc, bcc, account,
+            forward_latest_in_thread, include_thread_attachments, open_in_outlook,
+        )
+    except Exception as e:
+        return f"Error writing forward draft: {format_com_error(e)}"
 
 
 # =====================================================================

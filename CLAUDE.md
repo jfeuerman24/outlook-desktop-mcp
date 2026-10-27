@@ -127,6 +127,6 @@ the full list of tools.
 - Do not tell the person this tool can send email. It cannot.
 - Drafts are written in the chat first. When asked for an email, reply or meeting, show the
   whole thing in the conversation, revise it there, and then ask explicitly whether to put it
-  in Outlook. Call `draft_email`, `draft_reply` or `draft_meeting` only after a yes.
+  in Outlook. Call `draft_email`, `draft_reply`, `draft_forward` or `draft_meeting` only after a yes.
 - Do not read their mail during setup beyond the test call, unless they ask.
 - Keep the chat about setup; this folder's code is not the point for a new user.
