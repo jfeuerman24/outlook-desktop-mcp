@@ -3,6 +3,14 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## 0.8.1 - 2026-10-27
+
+### Changed
+- `reply_context` now counts the messages that come after the one being answered
+  (`newer_messages`, `newest_entry_id`) and, when there are any, says in its note to reply
+  to the newest unless the user means this one and to tell the user. Before, the result only
+  carried `requested_is_newest: false` and left it to the model to notice.
+
 ## 0.8.0 - 2026-10-27
 
 Prompted by a Claude Desktop session that took two minutes to find one thread with a company:

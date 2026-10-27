@@ -1037,11 +1037,13 @@ async def reply_context(
     Returns:
         JSON: subject (as the reply would carry it), reply_all, recipients
         {to, cc, resolved: [{name, address, type}]}, participants
-        [{name, address}], thread_depth of the message, requested_is_newest
-        (false means newer messages exist in the thread), message_count,
-        source, thread [{entry_id, date, from, from_name, folder, thread_depth,
-        is_requested_message, text}] oldest first, and message (the answered
-        message in full, quoted history removed).
+        [{name, address}], thread_depth of the message, requested_is_newest,
+        newer_messages (how many come after the one being answered) and
+        newest_entry_id, message_count, source, thread [{entry_id, date, from,
+        from_name, folder, thread_depth, is_requested_message, text}] oldest
+        first, message (the answered message in full, quoted history removed),
+        and a note. When newer_messages is above 0 the note says to reply to
+        the newest unless the user means this one, and to tell the user.
     """
     def _ctx(outlook, namespace, entry_id, reply_all, count, max_body_chars, account):
         count = min(max(1, int(count or 10)), 50)
@@ -1101,7 +1103,17 @@ async def reply_context(
                 "text": record.get("body", ""),
             })
         newest_id = str(thread[-1]["entry_id"]) if thread else requested_id
+        # Messages after the one being answered. If the answered message is older than the
+        # digest window it is not in the list at all, and then everything shown is newer.
+        requested_index = next((i for i, t in enumerate(thread) if t["is_requested_message"]), None)
+        newer = (len(thread) - 1 - requested_index) if requested_index is not None else len(thread)
         message = format_email_full(item)
+        note = ("Nothing was created or saved. Open the chat preview with a short Context block "
+                "built from this, then the draft with these recipients.")
+        if newer > 0:
+            note += (f" {newer} newer message{'s' if newer != 1 else ''} in this thread come after the one being "
+                     f"answered. Reply to the newest (entry_id {newest_id}) unless the user means this one, and "
+                     "tell the user which you chose.")
         return json.dumps({
             "subject": subject,
             "reply_all": reply_all,
@@ -1109,12 +1121,13 @@ async def reply_context(
             "participants": [{"name": name, "address": address} for address, name in participants.items()],
             "thread_depth": message.get("thread_depth"),
             "requested_is_newest": newest_id == requested_id,
+            "newer_messages": newer,
+            "newest_entry_id": newest_id,
             "message_count": len(thread),
             "source": source,
             "thread": thread,
             "message": message,
-            "note": "Nothing was created or saved. Open the chat preview with a short Context block "
-                    "built from this, then the draft with these recipients.",
+            "note": note,
         }, indent=2, default=str)
 
     try:
