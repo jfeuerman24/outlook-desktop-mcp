@@ -3,6 +3,13 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## Unreleased
+
+### Fixed
+- `read_attachment` on an Excel file left the workbook open when the requested sheet did
+  not exist (or reading raised), so on Windows the temporary copy could not be deleted. The
+  workbook is now closed on every path. This is what failed the unit tests in CI for 0.5.0.
+
 ## 0.5.0 - 2026-10-27
 
 ### Added

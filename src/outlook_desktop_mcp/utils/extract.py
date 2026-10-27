@@ -104,34 +104,39 @@ def extract_docx(path: pathlib.Path, max_chars: int) -> tuple[str, dict]:
 def extract_xlsx(path: pathlib.Path, max_chars: int, sheet: str = "") -> tuple[str, dict]:
     from openpyxl import load_workbook
 
+    # A read-only workbook keeps the file open until close(). Close it on every
+    # path (early return, exception too), or Windows cannot delete the temp copy
+    # the caller made.
     wb = load_workbook(str(path), read_only=True, data_only=True)
-    names = wb.sheetnames
-    if sheet:
-        chosen = [n for n in names if n.lower() == sheet.lower()] or [n for n in names if sheet.lower() in n.lower()]
-        if not chosen:
-            return "", {"kind": "xlsx", "sheets": names, "error": f"No sheet matching {sheet!r}"}
-    else:
-        chosen = names
-    parts = []
-    rows_read = {}
-    for name in chosen:
-        ws = wb[name]
-        lines = []
-        count = 0
-        for row in ws.iter_rows(values_only=True):
-            if count >= MAX_SHEET_ROWS:
-                lines.append(f"... (stopped after {MAX_SHEET_ROWS} rows; ask for this sheet alone or a narrower range)")
-                break
-            if row is None or all(v is None or str(v).strip() == "" for v in row):
-                continue
-            cells = ["" if v is None else str(v) for v in row]
-            while cells and cells[-1] == "":
-                cells.pop()
-            lines.append("\t".join(cells))
-            count += 1
-        rows_read[name] = count
-        parts.append(f"--- sheet: {name} ---\n" + "\n".join(lines))
-    wb.close()
+    try:
+        names = wb.sheetnames
+        if sheet:
+            chosen = [n for n in names if n.lower() == sheet.lower()] or [n for n in names if sheet.lower() in n.lower()]
+            if not chosen:
+                return "", {"kind": "xlsx", "sheets": names, "error": f"No sheet matching {sheet!r}"}
+        else:
+            chosen = names
+        parts = []
+        rows_read = {}
+        for name in chosen:
+            ws = wb[name]
+            lines = []
+            count = 0
+            for row in ws.iter_rows(values_only=True):
+                if count >= MAX_SHEET_ROWS:
+                    lines.append(f"... (stopped after {MAX_SHEET_ROWS} rows; ask for this sheet alone or a narrower range)")
+                    break
+                if row is None or all(v is None or str(v).strip() == "" for v in row):
+                    continue
+                cells = ["" if v is None else str(v) for v in row]
+                while cells and cells[-1] == "":
+                    cells.pop()
+                lines.append("\t".join(cells))
+                count += 1
+            rows_read[name] = count
+            parts.append(f"--- sheet: {name} ---\n" + "\n".join(lines))
+    finally:
+        wb.close()
     text, truncated = _cap("\n\n".join(parts), max_chars)
     return text, {"kind": "xlsx", "sheets": names, "sheets_read": chosen, "rows_read": rows_read,
                   "truncated": truncated, "note": "Values are cached results; formulas are not shown."}
