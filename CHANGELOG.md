@@ -3,6 +3,15 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## 0.8.2 - 2026-10-27
+
+### Fixed
+- `contact_history` reported `sent_scan_capped` whenever an account's Sent Items walk examined
+  its 100 messages without reaching the requested count, even when every relevant message had
+  been found or the window held no more messages. It is now reported only when the walk
+  stopped with messages still unread, and `sent_scan_partial` names each such account with how
+  many of its sent messages were checked and why it stopped.
+
 ## 0.8.1 - 2026-10-27
 
 ### Changed

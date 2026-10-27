@@ -3111,8 +3111,10 @@ async def contact_history(
         direction of received, sent or copied, and its account), meetings {last,
         next, past_count, upcoming_count}, accounts_searched, accounts_skipped
         and elapsed_s. subject_matches (with a note) appears only when no mail
-        from or to the person was found. sent_scan_capped means the slow
-        fallback scan of Sent Items stopped at its cap. "partial": true means
+        from or to the person was found. sent_scan_capped, with
+        sent_scan_partial listing the accounts and how much of each was
+        checked, appears only when the slow fallback scan of Sent Items
+        stopped with messages still unread in the window. "partial": true means
         the time limit stopped the sweep; narrow it (one account, fewer days)
         rather than repeating it.
     """
@@ -3137,7 +3139,7 @@ async def contact_history(
         copied: list = []
         searched = []
         partial = False
-        sent_scan_capped = False
+        sent_scan_partial: list = []  # per account where the Sent Items walk stopped before the end of the window
         scan_spent = 0.0
         inbox_trees: dict[str, list] = {}
         for store in stores:
@@ -3213,19 +3215,24 @@ async def contact_history(
                 or (not sent_here and dasl.looks_like_address(needle) and not found))
             if scan_python and not legacy and scan_spent >= _SENT_SCAN_TOTAL_S:
                 scan_python = False
-                sent_scan_capped = True
+                sent_scan_partial.append({"account": name, "scanned": 0,
+                                          "of": int(_safe_get(lambda: items.Count, 0) or 0),
+                                          "reason": "time budget used up by earlier accounts"})
             if scan_python and not deadline.expired():
                 limit = _SENDER_SCAN_LIMIT if legacy else _SENT_SCAN_CAP
+                in_window = int(_safe_get(lambda: items.Count, 0) or 0)
                 scan_started = time.monotonic()
                 stop_at = float("inf") if legacy else scan_started + min(_SENT_SCAN_SECONDS, _SENT_SCAN_TOTAL_S - scan_spent)
                 matched = 0
                 scanned = 0
+                stopped = ""
                 for item in _iter_items(items, limit):
                     if deadline.expired():
                         partial = True
+                        stopped = "call time limit"
                         break
                     if time.monotonic() >= stop_at:
-                        sent_scan_capped = True
+                        stopped = "time cap"
                         break
                     scanned += 1
                     try:
@@ -3246,8 +3253,13 @@ async def contact_history(
                             break
                     except Exception:
                         continue
-                if scanned >= limit and matched < count:
-                    sent_scan_capped = True
+                if not stopped and scanned >= limit and in_window > scanned:
+                    stopped = "message cap"
+                # Only a real gap is reported: the walk stopped with messages still unread in
+                # the window and fewer matches than asked for. A walk that reached the end of
+                # the window, or found enough, is complete.
+                if stopped and matched < count:
+                    sent_scan_partial.append({"account": name, "scanned": scanned, "of": in_window, "reason": stopped})
                 scan_spent += time.monotonic() - scan_started
             seen_ids = {str(r.get("entry_id")) for r in sent}
             sent.extend(r for r in sent_here if str(r.get("entry_id")) not in seen_ids)
@@ -3333,12 +3345,15 @@ async def contact_history(
                 f"No mail from or to {needle!r} as a person. These messages carry it in the subject, so it "
                 "is probably a company, deal or topic: use search_emails (query=, folder=\"all\") for those, "
                 "and get_conversation on a hit for the thread.")
-        if sent_scan_capped:
+        if sent_scan_partial:
             out["sent_scan_capped"] = True
+            out["sent_scan_partial"] = sent_scan_partial
+            where = "; ".join(f"{p['account']}: {p['scanned']} of {p['of']} sent messages ({p['reason']})"
+                              for p in sent_scan_partial)
             out["sent_scan_note"] = (
-                "The slow fallback scan of Sent Items stopped at its cap, so mail sent to this address under a "
-                "display name the server has not seen may be missing. Name the person as Outlook shows them "
-                "to search Sent Items natively.")
+                "Sent Items were only partly checked for recipients Outlook shows by name rather than address, "
+                f"in {where}. Mail sent to this address under a display name there may be missing. Name the "
+                "person as Outlook shows them to search Sent Items natively.")
         if skipped:
             out["accounts_skipped"] = skipped
         if partial:
