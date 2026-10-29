@@ -1,13 +1,28 @@
-"""Plain-text body cleanup: drop the quoted history under a reply and Outlook's external-sender banner.
+"""Plain-text body cleanup: drop the quoted history under a reply, Outlook's external-sender
+banner, and the tracking links that make up most of a long email.
 
 Outlook's ``Body`` is plain text, so a reply carries the whole earlier chain under it.
 When a client reads several messages of one thread that history is repeated per message
-and the 5 000-character cap then cuts the *newest* text. ``trim_quoted_history`` cuts at
-the first quote marker instead, so the cap applies to the message's own words.
+and the character cap then cuts the *newest* text. ``trim_quoted_history`` cuts at the
+first quote marker instead, so the cap applies to the message's own words.
+
+Links are the other thing that fills a body. Outlook renders every HTML link as
+``text <https://...>``, and in confirmations and newsletters the URLs are 85 to 99 per cent
+of the characters (a 57,000-character flight confirmation held 6,500 of text). ``shorten_links``
+turns each long URL into ``[link: domain]``, drops links to image files, and collapses
+repeats, so the cap falls on words rather than tracking parameters.
 
 Pure functions, unit-tested without Outlook.
 """
 import re
+from urllib.parse import urlparse
+
+DEFAULT_BODY_CHARS = 8000  # cap on a body after trimming and link shortening
+KEEP_URL_CHARS = 60  # a URL this short is left as it is; it may be the point of the message
+_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp")
+_URL = re.compile(r"<(https?://[^>\s]+)>|(https?://[^\s<>\"']+)")
+_LINK_RUNS = re.compile(r"(\[link: [^\]]*\])(?:[ \t]*\n?[ \t]*\1)+")
+_SPACES = re.compile(r"[ \t]{3,}")
 
 BLANK_CHARS = " \t\r\n\xa0​﻿"
 
@@ -64,13 +79,57 @@ def trim_quoted_history(text: str) -> tuple[str, bool]:
     return tidy(text[:cut]), True
 
 
-def clean_body(text: str, *, trim_history: bool = True, max_length: int = 5000) -> dict:
-    """``{"body", "body_trimmed", "body_truncated"}`` for a plain-text Outlook body."""
+def _domain(url: str) -> str:
+    try:
+        host = urlparse(url).netloc.lower().split(":")[0]
+    except Exception:
+        return ""
+    parts = host.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def shorten_links(text: str) -> tuple[str, int]:
+    """``(text, count)`` with every URL longer than ``KEEP_URL_CHARS`` replaced by
+    ``[link: domain]`` (dropped outright when it points at an image file), runs of the
+    same placeholder collapsed to one, and runs of spaces squeezed. Short URLs stay."""
+    count = 0
+
+    def replace(match):
+        nonlocal count
+        url = match.group(1) or match.group(2)
+        if len(url) <= KEEP_URL_CHARS:
+            return match.group(0)
+        count += 1
+        path = url.split("?", 1)[0].split("#", 1)[0].lower()
+        if path.endswith(_IMAGE_EXTENSIONS):
+            return ""
+        return f"[link: {_domain(url)}]"
+
+    out = _URL.sub(replace, text or "")
+    if count:
+        out = _LINK_RUNS.sub(r"\1", out)
+        out = _SPACES.sub("  ", out)
+    return out, count
+
+
+def clean_body(text: str, *, trim_history: bool = True, max_length: int = DEFAULT_BODY_CHARS) -> dict:
+    """``{"body", "body_trimmed", "body_truncated"}`` for a plain-text Outlook body, plus
+    ``links_shortened`` when links were, and ``body_total_chars`` when the cap cut it
+    (so the caller knows how much to ask for). ``max_length`` 0 means no cap."""
     if trim_history:
         body, trimmed = trim_quoted_history(text)
     else:
         body, trimmed = tidy(strip_external_banner(text)), False
-    truncated = len(body) > max_length
+    body, links = shorten_links(body)
+    if links:
+        body = tidy(body)
+    total = len(body)
+    truncated = bool(max_length) and total > max_length
     if truncated:
         body = body[:max_length].rstrip() + "\n... [truncated]"
-    return {"body": body, "body_trimmed": trimmed, "body_truncated": truncated}
+    out = {"body": body, "body_trimmed": trimmed, "body_truncated": truncated}
+    if links:
+        out["links_shortened"] = links
+    if truncated:
+        out["body_total_chars"] = total
+    return out

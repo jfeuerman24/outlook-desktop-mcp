@@ -38,6 +38,7 @@ from outlook_desktop_mcp.utils import dasl, deadline, settings
 from outlook_desktop_mcp.utils.addresses import classify_direction, format_recipients, get_smtp, sender_matches
 from outlook_desktop_mcp.utils.dates import iso, to_local
 from outlook_desktop_mcp.utils.extract import extract
+from outlook_desktop_mcp.utils.text import DEFAULT_BODY_CHARS
 from outlook_desktop_mcp.utils.html import (
     DEFAULT_INLINE_COLOR, inject_into_body, insert_inline, plain_text_mode, replace_note, strip_inline,
     style_html, text_to_html, wrap_note,
@@ -987,6 +988,7 @@ async def read_email(
     folder: str = "inbox",
     include_history: bool = False,
     account: str = "",
+    max_chars: int = 0,
 ) -> str:
     """Read the full content of a specific email.
 
@@ -995,10 +997,15 @@ async def read_email(
     subject_search (finds most recent match by subject substring).
 
     By default the body is the message's OWN text: the quoted earlier
-    messages under a reply are removed before the 5000-character cap
-    (body_trimmed=true says something was removed). Use get_conversation
-    to read the earlier messages each once, or include_history=true to get
-    the raw body with the quoted chain.
+    messages under a reply are removed (body_trimmed=true says so) and long
+    web links are shortened to [link: domain], image links dropped
+    (links_shortened says how many), before an 8,000-character cap. Most
+    long emails are confirmations and newsletters whose length was tracking
+    links, so after shortening they fit. When one does not, body_truncated
+    is true and body_total_chars says how long it is: read it again with
+    max_chars=body_total_chars for the rest rather than telling the user it
+    was cut off. Use get_conversation to read the earlier messages each
+    once, or include_history=true to get the raw body with the quoted chain.
 
     If the user wants to reply to or forward this message, also call
     reply_context on it: it returns the To/CC Outlook's own Reply or Reply
@@ -1016,21 +1023,26 @@ async def read_email(
             Default false.
         account: Optional. Account display name (or substring) to target.
             Default: primary account. Use list_accounts to see available accounts.
+        max_chars: Optional. Cap on the body. 0 (default) = 8,000; give a
+            larger number (body_total_chars from a truncated read) for a long
+            message. Up to 200,000.
 
     Returns:
         JSON object with full email details (entry_id, subject, sender,
         sender_name, received_time, sent_time, folder, unread, to, cc,
         recipients with SMTP addresses, body, body_trimmed, body_truncated,
-        attachment info, conversation_id, thread_depth). thread_depth is 0 for
-        the first message of a thread, 1 for a reply to it, and so on; when it
-        is above 0 there are earlier messages the user may not have seen, so
-        use reply_context or get_conversation before acting on it.
+        body_total_chars when truncated, links_shortened, attachment info,
+        conversation_id, thread_depth). thread_depth is 0 for the first
+        message of a thread, 1 for a reply to it, and so on; when it is above
+        0 there are earlier messages the user may not have seen, so use
+        reply_context or get_conversation before acting on it.
     """
-    def _read(outlook, namespace, entry_id, subject_search, folder, include_history, account):
+    def _read(outlook, namespace, entry_id, subject_search, folder, include_history, account, max_chars):
         trim = not include_history
+        cap = min(int(max_chars), 200000) if max_chars and int(max_chars) > 0 else DEFAULT_BODY_CHARS
         if entry_id:
             item = namespace.GetItemFromID(entry_id)
-            return json.dumps(format_email_full(item, trim_history=trim), indent=2, default=str)
+            return json.dumps(format_email_full(item, body_max_length=cap, trim_history=trim), indent=2, default=str)
 
         if not subject_search:
             return json.dumps({"error": "Provide either entry_id or subject_search"})
@@ -1049,10 +1061,10 @@ async def read_email(
         if items.Count == 0:
             return json.dumps({"error": f"No email found matching '{subject_search}'"})
 
-        return json.dumps(format_email_full(items.Item(1), trim_history=trim), indent=2, default=str)
+        return json.dumps(format_email_full(items.Item(1), body_max_length=cap, trim_history=trim), indent=2, default=str)
 
     try:
-        return await bridge.call(_read, entry_id, subject_search, folder, include_history, account)
+        return await bridge.call(_read, entry_id, subject_search, folder, include_history, account, max_chars)
     except Exception as e:
         return f"Error reading email: {format_com_error(e)}"
 
@@ -1090,8 +1102,11 @@ async def get_conversation(
         include_bodies: If true (default), include each message's trimmed body.
             If false, return metadata only (much smaller).
         max_body_chars: Cap each message's body at this many characters (0 =
-            no cap). Useful for a cheap look at a long thread; the newest
-            message is never cut.
+            the default 8,000; a smaller number for a cheap look at a long
+            thread, a larger one for a long message). The newest message
+            always gets at least the default. Long links are shortened first
+            (links_shortened); body_truncated and body_total_chars say when a
+            message was cut and how long it is.
         account: Optional. Account display name (or substring) the message lives
             in. Default: primary account.
 
@@ -1112,13 +1127,13 @@ async def get_conversation(
         newest_index = len(messages) - 1
         for index, (path, node) in enumerate(messages):
             try:
-                record = format_email_full(node) if include_bodies else format_email_summary(node)
+                cap = max_body_chars or DEFAULT_BODY_CHARS
+                if index == newest_index:
+                    cap = max(cap, DEFAULT_BODY_CHARS)
+                record = (format_email_full(node, body_max_length=min(cap, 200000)) if include_bodies
+                          else format_email_summary(node))
                 record["folder"] = path or record.get("folder", "")
                 record["is_requested_message"] = str(node.EntryID) == str(item.EntryID)
-                body_text = record.get("body")
-                if max_body_chars and index != newest_index and isinstance(body_text, str) and len(body_text) > max_body_chars:
-                    record["body"] = body_text[:max_body_chars]
-                    record["body_capped_at"] = max_body_chars
                 out.append(record)
             except Exception:
                 continue

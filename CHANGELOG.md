@@ -3,6 +3,23 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## 0.11.1 - 2026-10-29
+
+### Changed
+- **Long emails no longer lose their content to tracking links.** A flight confirmation was
+  cut off before the flights: the body cap was 5,000 characters and the message was 57,693, of
+  which 51,049 were URLs (Outlook renders every HTML link as `text <https://...>`). In the
+  mailboxes measured, URLs were 85 to 99 per cent of every long email. Bodies now have each
+  URL over 60 characters shortened to `[link: domain]`, links to image files dropped, and
+  repeats collapsed, before the cap; the same confirmation comes out at 7,600 characters with
+  the itinerary intact, and newsletters shrink by 80 to 98 per cent. Short URLs are kept as
+  they are. Results carry `links_shortened`.
+- The cap is 8,000 characters (was 5,000) now that links do not fill it. `read_email` takes
+  `max_chars` to raise it for a long message, and a truncated body reports
+  `body_total_chars` so Claude can ask for the rest instead of saying it was cut off.
+  `get_conversation`'s `max_body_chars` can raise the cap as well as lower it; the newest
+  message always gets at least the default.
+
 ## 0.11.0 - 2026-10-29
 
 ### Added

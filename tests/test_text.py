@@ -1,7 +1,7 @@
 """Unit tests for utils.text — no Outlook needed. Run: python -m unittest discover -s tests"""
 import unittest
 
-from outlook_desktop_mcp.utils.text import clean_body, strip_external_banner, trim_quoted_history
+from outlook_desktop_mcp.utils.text import clean_body, shorten_links, strip_external_banner, trim_quoted_history
 
 OUTLOOK_REPLY = (
     "Sounds good, let's do Thursday.\r\n\r\nLinda\r\n\r\n"
@@ -18,6 +18,49 @@ BANNER = (
     "You don't often get email from linda@example.com. Learn why this is important\n"
     "Hi Alex;\nThanks for the info.\n"
 )
+
+
+TRACKING = "https://click.jetblue.com/f/a/" + "x" * 120 + "?utm_source=email&token=" + "y" * 80
+IMAGE = "https://braze-images.com/appboy/assets/" + "z" * 60 + "/original.png?1761700000"
+CONFIRMATION = (
+    "Your Flight Itinerary\nYour JetBlue confirmation code is JUVTNS\n\n"
+    f" <{IMAGE}>\nBOS  <{IMAGE}>\n  RDU\nFlight 2283\nTue, Nov 3 11:36am\n\n"
+    f"Manage your booking <{TRACKING}>\nCheck in <{TRACKING}>\n"
+    f"Questions? https://jetblue.com/help or call 1-800-JETBLUE.\n"
+    f"Unsubscribe <{TRACKING}> Privacy <{TRACKING}>\n"
+)
+
+
+class LinkTests(unittest.TestCase):
+    def test_long_links_become_domain_placeholders_and_short_ones_stay(self):
+        out, count = shorten_links(CONFIRMATION)
+        self.assertEqual(count, 6)
+        self.assertIn("Manage your booking [link: jetblue.com]", out)
+        self.assertIn("https://jetblue.com/help", out)
+        self.assertNotIn("utm_source", out)
+        self.assertNotIn("x" * 20, out)
+
+    def test_image_links_are_dropped_and_repeats_collapsed(self):
+        out, _ = shorten_links(CONFIRMATION)
+        self.assertNotIn("braze-images", out)
+        self.assertIn("Flight 2283", out)
+        self.assertEqual(out.count("[link: jetblue.com]"), 4)  # a word between two links keeps both
+        adjacent, _ = shorten_links(f"footer <{TRACKING}>\n <{TRACKING}>  <{TRACKING}> end")
+        self.assertEqual(adjacent, "footer [link: jetblue.com] end")
+        self.assertEqual(shorten_links("no links here"), ("no links here", 0))
+
+    def test_clean_body_shortens_before_the_cap_and_reports_totals(self):
+        out = clean_body(CONFIRMATION)
+        self.assertFalse(out["body_truncated"])
+        self.assertEqual(out["links_shortened"], 6)
+        self.assertLess(len(out["body"]), 400)
+        self.assertNotIn("body_total_chars", out)
+        small = clean_body(CONFIRMATION, max_length=100)
+        self.assertTrue(small["body_truncated"])
+        self.assertEqual(small["body_total_chars"], len(out["body"]))
+        self.assertTrue(small["body"].endswith("... [truncated]"))
+        self.assertFalse(clean_body("x" * 9000, max_length=0)["body_truncated"])
+        self.assertTrue(clean_body("x" * 9000)["body_truncated"])  # default cap 8,000
 
 
 class TrimTests(unittest.TestCase):

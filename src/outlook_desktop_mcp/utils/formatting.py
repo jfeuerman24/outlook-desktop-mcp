@@ -17,7 +17,7 @@ from outlook_desktop_mcp.tools import recurrence
 from outlook_desktop_mcp.tools.conversation import thread_depth
 from outlook_desktop_mcp.utils.addresses import format_recipients, get_smtp, recipient_address
 from outlook_desktop_mcp.utils.dates import iso, iso_date
-from outlook_desktop_mcp.utils.text import clean_body
+from outlook_desktop_mcp.utils.text import DEFAULT_BODY_CHARS, clean_body
 
 
 def truncate(text: str, max_length: int = 2000) -> str:
@@ -79,11 +79,12 @@ def format_email_summary(item) -> dict:
     }
 
 
-def format_email_full(item, body_max_length: int = 5000, trim_history: bool = True) -> dict:
+def format_email_full(item, body_max_length: int = DEFAULT_BODY_CHARS, trim_history: bool = True) -> dict:
     """Extract full email details including body.
 
     ``trim_history=True`` (default) removes the quoted earlier messages under a reply
     before applying the length cap; ``body_trimmed`` says whether anything was removed.
+    Long links are shortened first (``links_shortened``); ``body_max_length`` 0 = no cap.
     """
     result = format_email_summary(item)
     result["sent_time"] = iso(_safe(lambda: item.SentOn, None))
