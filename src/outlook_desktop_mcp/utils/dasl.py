@@ -23,6 +23,7 @@ DISPLAY_CC = "urn:schemas:httpmail:displaycc"
 DISPLAY_BCC = "urn:schemas:httpmail:displaybcc"
 DATE_RECEIVED = "urn:schemas:httpmail:datereceived"
 READ = "urn:schemas:httpmail:read"
+HAS_ATTACHMENT = "urn:schemas:httpmail:hasattachment"
 # A follow-up flag is a task on the message (Outlook 2007+): PidLidTaskComplete is false while
 # the flag is open and true once it is marked complete. PR_FLAG_STATUS = 2 is the older,
 # pre-task form of the same flag and is kept for messages written that way.
@@ -138,6 +139,12 @@ def received_until(when: datetime) -> str:
 
 def unread_filter() -> str:
     return f"\"{READ}\" = 0"
+
+
+def has_attachment_filter() -> str:
+    """Messages with at least one attachment (inline pictures count, so a name match
+    in Python still follows)."""
+    return f"\"{HAS_ATTACHMENT}\" = 1"
 
 
 def flagged_filter() -> str:

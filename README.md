@@ -152,7 +152,7 @@ You have three options:
 |------|-------------|
 | `list_emails` | List recent emails from any folder (or `folder="all"` for the Inbox tree, Sent Items and Archive), with optional unread, flagged, date, sender and subfolder filters; `account="all"` for every mailbox. Every summary says whether the message is `flagged` for follow-up and its `flag_due` date |
 | `read_email` | Read full email content by entry ID or subject search (quoted history trimmed unless `include_history`); `thread_depth` says how deep in a thread it sits |
-| `search_emails` | Find mail by a word or name in the subject, sender or recipients (`match="any"`, the default) or the subject only, by sender alone, and by date, in about a second even in a big folder; `folder="all"` covers the Inbox tree, Sent Items and Archive in one call; `include_body` also scans message text (slow); `flagged_only` for flagged mail; `account="all"` for every mailbox |
+| `search_emails` | Find mail by a word or name in the subject, sender or recipients (`match="any"`, the default) or the subject only, by sender alone, and by date, in about a second even in a big folder; `folder="all"` covers the Inbox tree, Sent Items and Archive in one call; `include_body` also scans message text (slow); `flagged_only` for flagged mail; `attachment_name` finds mail by an attached file's name ("the EA redline"; opens each candidate, so pair it with a sender or dates); `account="all"` for every mailbox |
 | `get_conversation` | Every message of a thread, oldest first, each once, across folders and dates; `max_body_chars` for a cheap look at long threads |
 | `reply_context` | What a reply preview needs: the To/CC Outlook's own Reply or Reply All would use, who is on the thread, a digest of the earlier messages, the message in full. Creates nothing |
 | `open_in_outlook` | Open an email, draft, meeting, appointment or task in its own Outlook window when you ask. Changes nothing |
@@ -160,10 +160,11 @@ You have three options:
 | `list_folders` | Browse the folder hierarchy with item counts |
 | `draft_email` | Write a new email to Drafts with To/CC/BCC and optional file attachments. **Not sent.** |
 | `draft_reply` | Write a reply or reply-all above the quoted thread, or answer a list point by point with `inline_replies` (each answer in red under the paragraph it answers, inside the quoted message), save to Drafts, optional attachments. **Not sent.** |
-| `draft_forward` | Forward an email with Outlook's own Forward() (FW: subject, header block, quoted message, attachments), your note above it, saved to Drafts. Can forward the newest message of the thread and pull in attachments from earlier messages. **Not sent.** |
+| `draft_forward` | Forward an email with Outlook's own Forward() (FW: subject, header block, quoted message, attachments), your note above it, saved to Drafts. Can forward the newest message of the thread and pull in attachments from earlier messages; `inline_notes` writes your comments in red under the paragraphs they refer to. **Not sent.** |
 | `update_draft` | Change an existing draft's note, inline answers, subject or recipients instead of making a new one. **Not sent.** |
 | `mark_as_read` | Mark a specific email as read |
 | `mark_as_unread` | Mark a specific email as unread |
+| `set_flag` | Flag an email for follow-up (no date, today, tomorrow, this week, next week or a date), mark the flag complete, or clear it |
 | `move_email` | Move an email to Archive, Trash, or any folder |
 
 ### Calendar
@@ -172,14 +173,14 @@ You have three options:
 |------|-------------|
 | `list_calendars` | List every calendar folder in an account (Birthdays, holidays, shared, subscribed) |
 | `list_events` | List events within a date range, from one calendar or `calendar="all"` |
-| `get_event` | Read full event details by entry ID |
+| `get_event` | Read full event details by entry ID: for a meeting you organise, every attendee's response grouped as accepted / tentative / declined / no response; for a series, the recurrence pattern |
 | `search_events` | Search calendar events by keyword within a date range |
-| `create_event` | Create a personal calendar appointment (no attendees), with optional colour categories |
-| `draft_meeting` | Put a meeting with attendees on the calendar, with optional colour categories; it opens in Outlook for you to check. **Invitations not sent.** |
+| `create_event` | Create a personal calendar appointment (no attendees), with optional colour categories and recurrence (daily, weekly on given days, weekdays, monthly, yearly; until a date or a number of times) |
+| `draft_meeting` | Put a meeting with attendees on the calendar, with optional colour categories and the same recurrence options; it opens in Outlook for you to check. **Invitations not sent.** |
 | `draft_forward_event` | Forward an event: for a meeting you organise, the person is added as an attendee and you press Send Update; for anything else, an email with the event attached as .ics, saved to Drafts. **Not sent.** |
 | `move_event` | Move an event to another calendar in the same mailbox or in another account; one call per event, so "put the whole trip on my Trips calendar" is a list, a confirmation, then the moves |
-| `update_event` | Change an event's subject, time, location, categories, etc. Saved, not sent |
-| `delete_event` | Delete an appointment or a received meeting. Refuses meetings you organised |
+| `update_event` | Change an event's subject, time, location, categories, etc. On a series, every occurrence, or just one with `occurrence_date`. Saved, not sent |
+| `delete_event` | Delete an appointment or a received meeting. Refuses meetings you organised. On a series, one occurrence (`occurrence_date`) or all of them (`whole_series`), never by accident |
 
 ### Tasks
 

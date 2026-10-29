@@ -13,8 +13,9 @@ from outlook_desktop_mcp.tools._folder_constants import (
     TASK_STATUS_NAMES,
     IMPORTANCE_NAMES,
 )
+from outlook_desktop_mcp.tools import recurrence
 from outlook_desktop_mcp.tools.conversation import thread_depth
-from outlook_desktop_mcp.utils.addresses import format_recipients, get_smtp
+from outlook_desktop_mcp.utils.addresses import format_recipients, get_smtp, recipient_address
 from outlook_desktop_mcp.utils.dates import iso, iso_date
 from outlook_desktop_mcp.utils.text import clean_body
 
@@ -119,8 +120,56 @@ def format_event_summary(item, calendar: str = "") -> dict:
     return summary
 
 
+ATTENDEE_ROLES = {1: "required", 2: "optional", 3: "resource"}
+_RESPONSE_BUCKET = {"accepted": "accepted", "tentative": "tentative", "declined": "declined"}
+
+
+def attendee_responses(item) -> tuple[list[dict], dict]:
+    """Every attendee of a meeting with their response, and the names grouped by
+    response (accepted, tentative, declined, no_response). The organiser is listed but
+    not grouped. Outlook tracks responses only for meetings the user organises; on a
+    received meeting the other attendees show as "none"."""
+    attendees: list[dict] = []
+    groups: dict = {"accepted": [], "tentative": [], "declined": [], "no_response": []}
+    try:
+        recipients = item.Recipients
+        for i in range(recipients.Count):
+            recipient = recipients.Item(i + 1)
+            try:
+                status = RESPONSE_NAMES.get(int(_safe(lambda: recipient.MeetingResponseStatus, 0) or 0), "unknown")
+                name = str(recipient.Name or "")
+                attendees.append({
+                    "name": name,
+                    "address": recipient_address(recipient),
+                    "role": ATTENDEE_ROLES.get(int(_safe(lambda: recipient.Type, 1) or 1), "required"),
+                    "response": status,
+                })
+                if status != "organized":
+                    groups[_RESPONSE_BUCKET.get(status, "no_response")].append(name)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return attendees, groups
+
+
+def recurrence_info(item) -> dict:
+    """``recurrence_state`` and, for a recurring item, ``recurrence`` (the pattern as
+    plain data) and ``recurrence_summary`` (one line)."""
+    out = {"recurrence_state": recurrence.STATE_NAMES.get(int(_safe(lambda: item.RecurrenceState, 0) or 0), "unknown")}
+    if bool(_safe(lambda: item.IsRecurring, False)):
+        try:
+            desc = recurrence.describe(item.GetRecurrencePattern())
+            out["recurrence"] = desc
+            out["recurrence_summary"] = recurrence.summary(desc)
+        except Exception as e:
+            out["recurrence"] = {"error": str(e)}
+    return out
+
+
 def format_event_full(item, body_max_length: int = 5000, calendar: str = "") -> dict:
-    """Full event details including body."""
+    """Full event details including body, attendees with their responses, and the
+    recurrence pattern when there is one."""
     result = format_event_summary(item, calendar)
     result["body"] = truncate(item.Body or "", body_max_length)
     result["reminder_set"] = bool(item.ReminderSet)
@@ -129,6 +178,15 @@ def format_event_full(item, body_max_length: int = 5000, calendar: str = "") -> 
     )
     result["categories"] = item.Categories or ""
     result["response_status"] = RESPONSE_NAMES.get(item.ResponseStatus, "unknown")
+    attendees, groups = attendee_responses(item)
+    if attendees:
+        result["attendees"] = attendees
+        result["responses"] = groups
+        result["responses_tracked"] = int(_safe(lambda: item.MeetingStatus, 0) or 0) == 1  # olMeeting: the user organises it
+        if not result["responses_tracked"]:
+            result["responses_note"] = ("Outlook tracks attendee responses only for the organiser; this meeting was "
+                                        "received, so only the user's own response_status is known here.")
+    result.update(recurrence_info(item))
     return result
 
 

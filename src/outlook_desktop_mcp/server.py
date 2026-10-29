@@ -20,7 +20,7 @@ import re
 from mcp.server.fastmcp import FastMCP
 
 from outlook_desktop_mcp.com_bridge import OutlookBridge
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import os
 import platform
@@ -31,11 +31,12 @@ import time
 from outlook_desktop_mcp import __version__
 
 from outlook_desktop_mcp.tools import calendars as calendars_mod
+from outlook_desktop_mcp.tools import recurrence as recurrence_mod
 from outlook_desktop_mcp.tools.calendars import describe_calendars, is_people_calendar, resolve_calendars
 from outlook_desktop_mcp.tools.conversation import conversation_items, folder_path
 from outlook_desktop_mcp.utils import dasl, deadline, settings
 from outlook_desktop_mcp.utils.addresses import classify_direction, format_recipients, get_smtp, sender_matches
-from outlook_desktop_mcp.utils.dates import iso
+from outlook_desktop_mcp.utils.dates import iso, to_local
 from outlook_desktop_mcp.utils.extract import extract
 from outlook_desktop_mcp.utils.html import (
     DEFAULT_INLINE_COLOR, inject_into_body, insert_inline, plain_text_mode, replace_note, strip_inline,
@@ -162,18 +163,21 @@ _INSTRUCTIONS = (
     "take 10 to 30 seconds per large folder: use it last, with a date range. "
     "contact_history sweeps every account and calendar: use it for one specific person "
     "after a targeted search, with a full name, address or domain rather than a short "
-    "first name. Once the answer is in hand, at most one confirming call. A result with "
-    "\"partial\": true stopped at the time limit; narrow the request instead of repeating "
-    "it. elapsed_s in a result says how long that call took.\n\n"
+    "first name. A file name (\"the EA redline\") is search_emails attachment_name, with a "
+    "sender or a date range. Once the answer is in hand, at most one confirming call. A "
+    "result with \"partial\": true stopped at the time limit; narrow the request instead of "
+    "repeating it. elapsed_s in a result says how long that call took.\n\n"
     "AVAILABLE TOOL CATEGORIES:\n"
-    "- Email: list, read, search (sender/subject/body/unread/flagged filters), get_conversation, "
-    "reply_context, contact_history, draft_email, draft_reply (text above the thread, or "
-    "inline_replies under each point), draft_forward, update_draft, open_in_outlook, "
-    "mark read/unread, move, attachments\n"
-    "- Calendar: list_calendars, list events, create appointments, draft_meeting "
-    "(invitations unsent), draft_forward_event (an invitation forwarded, unsent), "
-    "move_event (to another calendar or account), update, delete (not organised "
-    "meetings), search events\n"
+    "- Email: list, read, search (sender/subject/body/unread/flagged/attachment-name filters), "
+    "get_conversation, reply_context, contact_history, draft_email, draft_reply (text above "
+    "the thread, or inline_replies under each point), draft_forward (inline_notes likewise), "
+    "update_draft, open_in_outlook, mark read/unread, set_flag (follow-up flags), move, "
+    "attachments\n"
+    "- Calendar: list_calendars, list events, get_event (attendee responses, recurrence), "
+    "create appointments (recurring too), draft_meeting (invitations unsent; recurring too), "
+    "draft_forward_event (an invitation forwarded, unsent), move_event (to another calendar "
+    "or account), update and delete (one occurrence or the series; not organised meetings), "
+    "search events\n"
     "- Tasks: create, list, complete, delete to-do items\n"
     "- Categories: list and set color categories on any item\n"
     "- Rules: list and enable/disable mail rules\n"
@@ -219,6 +223,7 @@ def _folder_subtree(folder, out: list, depth: int = 0) -> None:
 _SKIP_SUBFOLDERS = {"deleted items", "junk email", "junk e-mail", "outbox", "sync issues",
                     "conversation history", "rss feeds", "search folders"}
 _SENDER_SCAN_LIMIT = 1000  # items inspected per folder when filtering by sender
+_ATTACHMENT_SCAN_LIMIT = 1500  # messages with attachments opened per folder when matching a file name
 _SENT_SCAN_CAP = 100       # contact_history: Sent Items walked in Python when the native filter finds nothing
 _SENT_SCAN_SECONDS = 3.0   # ... the most seconds that walk may take per account ...
 _SENT_SCAN_TOTAL_S = 6.0   # ... and per call across every account
@@ -512,9 +517,9 @@ def _parse_inline_replies(raw: str) -> list[tuple[str, str]]:
 
 
 def _write_inline_answers(item, answers) -> list[str]:
-    """Write point-by-point answers inside the quoted message of a reply, each under the
-    paragraph its anchor names and in the inline_color, replacing any written earlier.
-    Returns the anchors that were not found; nothing is written then."""
+    """Write point-by-point answers inside the quoted message of a reply or forward, each
+    under the paragraph its anchor names and in the inline_color, replacing any written
+    earlier. Returns the anchors that were not found; nothing is written then."""
     try:
         item.GetInspector
     except Exception:
@@ -692,7 +697,7 @@ def _stores_for(namespace, account: str) -> tuple[list, list]:
 
 
 def _collect_across_stores(namespace, stores, folder: str, include_subfolders: bool,
-                           restriction: str, count: int, sender: str):
+                           restriction: str, count: int, sender: str, attachment_name: str = ""):
     """``(summaries, partial)`` newest-first across ``stores``, each tagged with its
     account when more than one store is searched. ``folder="all"`` means the Inbox tree,
     Sent Items and Archive together (subfolders included). Returns a JSON error string
@@ -718,7 +723,7 @@ def _collect_across_stores(namespace, stores, folder: str, include_subfolders: b
                 folders.append(target)
         if not folders:
             continue
-        found, cut = _collect_summaries(folders, restriction, count, sender)
+        found, cut = _collect_summaries(folders, restriction, count, sender, attachment_name)
         partial = partial or cut
         if len(stores) > 1:
             for r in found:
@@ -736,7 +741,25 @@ def _restrict_chain(items, filters):
     return items
 
 
-def _collect_summaries(folders, restriction: str, count: int, sender: str) -> tuple[list, bool]:
+def _attachment_names(item) -> list[str]:
+    """File names of the message's real attachments (inline pictures left out)."""
+    names: list[str] = []
+    try:
+        atts = item.Attachments
+        for i in range(int(atts.Count)):
+            att = atts.Item(i + 1)
+            if _is_inline_attachment(att):
+                continue
+            name = str(_safe_get(lambda: att.FileName) or "")
+            if name:
+                names.append(name)
+    except Exception:
+        pass
+    return names
+
+
+def _collect_summaries(folders, restriction: str, count: int, sender: str,
+                       attachment_name: str = "") -> tuple[list, bool]:
     """``(summaries, partial)`` newest-first across ``folders``.
 
     ``restriction`` (Jet or DASL) is applied by Outlook. So is the sender filter: a
@@ -745,9 +768,14 @@ def _collect_summaries(folders, restriction: str, count: int, sender: str) -> tu
     Outlook rejects that filter, or legacy_mode is on, the old path runs instead:
     walk up to ``_SENDER_SCAN_LIMIT`` messages and match the sender in Python, which
     is slow and only sees the newest messages.
+
+    ``attachment_name`` cannot be filtered by Outlook at all: each message the
+    restriction lets through is opened and its attachment names compared, up to
+    ``_ATTACHMENT_SCAN_LIMIT`` per folder; matches carry their ``attachments``.
     """
     results = []
     partial = False
+    needle = (attachment_name or "").strip().lower()
     sender_dasl = dasl.sql(dasl.sender_filter(sender)) if sender else ""
     for target in folders:
         if deadline.expired():
@@ -771,6 +799,8 @@ def _collect_summaries(folders, restriction: str, count: int, sender: str) -> tu
                 items = items.Restrict(restriction)
             native = False
         scan = count if (native or not sender) else _SENDER_SCAN_LIMIT
+        if needle:
+            scan = max(scan, _ATTACHMENT_SCAN_LIMIT)
         matched = 0
         for item in _iter_items(items, scan):
             if deadline.expired():
@@ -781,7 +811,15 @@ def _collect_summaries(folders, restriction: str, count: int, sender: str) -> tu
                     continue
                 if sender and not native and not sender_matches(item, sender, get_smtp(item)):
                     continue
-                results.append(format_email_summary(item))
+                if needle:
+                    names = _attachment_names(item)
+                    if not any(needle in n.lower() for n in names):
+                        continue
+                    summary = format_email_summary(item)
+                    summary["attachments"] = names
+                    results.append(summary)
+                else:
+                    results.append(format_email_summary(item))
                 matched += 1
                 if matched >= count:
                     break
@@ -1364,6 +1402,74 @@ async def mark_as_unread(entry_id: str, account: str = "") -> str:
 
 
 # =====================================================================
+# TOOL 5b: set_flag
+# =====================================================================
+
+_FLAG_INTERVALS = {"today": 0, "tomorrow": 1, "this_week": 2, "next_week": 3, "no_date": 4, "": 4}  # OlMarkInterval
+_OL_MARK_NO_DATE = 4
+_OL_MARK_COMPLETE = 5
+_FLAG_STATUS_WORD = {"flag": "flagged", "complete": "completed", "clear": "cleared"}
+
+
+@mcp.tool()
+async def set_flag(entry_id: str, flag: str = "flag", due: str = "", account: str = "") -> str:
+    """Flag an email for follow-up, mark its flag complete, or clear it. Nothing is
+    sent; this is Outlook's own follow-up flag, the one email summaries report as
+    flagged / flag_due and flagged_only finds.
+
+    Args:
+        entry_id: EntryID of the email (from list_emails, search_emails or
+            read_email).
+        flag: "flag" (default) sets or changes the flag; "complete" marks it
+            done (Outlook shows a tick); "clear" removes it.
+        due: With flag="flag": "" for no date (default), "today", "tomorrow",
+            "this_week", "next_week", or a date such as "2026-11-03". No
+            reminder is added.
+        account: Optional. Account display name (or substring). Only needed if
+            entry_id is ambiguous across stores.
+
+    Returns:
+        The email summary with flagged and flag_due as they now are. Outlook
+        refuses to flag a draft; the error says so.
+    """
+    def _flag(outlook, namespace, entry_id, flag, due, account):
+        if account:
+            store = _require_store(namespace, account)
+            item = namespace.GetItemFromID(entry_id, store.StoreID)
+        else:
+            item = namespace.GetItemFromID(entry_id)
+        if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
+            return err
+        mode = (flag or "flag").strip().lower()
+        if mode == "clear":
+            item.ClearTaskFlag()
+        elif mode == "complete":
+            item.MarkAsTask(_OL_MARK_COMPLETE)
+        elif mode == "flag":
+            key = (due or "").strip().lower().replace(" ", "_")
+            if key in _FLAG_INTERVALS:
+                item.MarkAsTask(_FLAG_INTERVALS[key])
+            else:
+                try:
+                    when = _parse_date(due)
+                except ValueError:
+                    return json.dumps({"error": "due must be today, tomorrow, this_week, next_week or a date "
+                                                f"like 2026-11-03; got {due!r}"})
+                item.MarkAsTask(_OL_MARK_NO_DATE)
+                item.TaskStartDate = when.strftime("%Y-%m-%d")  # a string: see _com_date
+                item.TaskDueDate = when.strftime("%Y-%m-%d")
+        else:
+            return json.dumps({"error": f'flag must be "flag", "complete" or "clear"; got {flag!r}'})
+        item.Save()
+        return json.dumps({"status": _FLAG_STATUS_WORD[mode], **format_email_summary(item)}, indent=2, default=str)
+
+    try:
+        return await bridge.call(_flag, entry_id, flag, due, account)
+    except Exception as e:
+        return f"Error setting flag: {format_com_error(e)}"
+
+
+# =====================================================================
 # TOOL 6: move_email
 # =====================================================================
 
@@ -1513,12 +1619,20 @@ async def draft_reply(
 # MAPI properties that mark an attachment as inline (a picture pasted in the body).
 _PR_ATTACH_CONTENT_ID = "http://schemas.microsoft.com/mapi/proptag/0x3712001F"
 _PR_ATTACHMENT_HIDDEN = "http://schemas.microsoft.com/mapi/proptag/0x7FFE000B"
+_PR_ATTACH_FLAGS = "http://schemas.microsoft.com/mapi/proptag/0x37140003"
+_ATT_MHTML_REF = 4  # the body refers to this attachment by cid:
 _OL_ATTACH_OLE = 6
+_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
 
 
 def _is_inline_attachment(att) -> bool:
     """True for pictures embedded in the message body and OLE objects, which are not
-    files the reader would want re-attached to a forward."""
+    files the reader would want re-attached to a forward or found by a name search.
+
+    The hidden property and the body-reference flag decide. A Content-ID alone does
+    not: Exchange Online stamps one on every attachment (a law firm's .docx and .pdf
+    carried them), so it only counts when the file is a picture.
+    """
     try:
         if int(att.Type) == _OL_ATTACH_OLE:
             return True
@@ -1530,8 +1644,13 @@ def _is_inline_attachment(att) -> bool:
     except Exception:
         pass
     try:
-        if str(att.PropertyAccessor.GetProperty(_PR_ATTACH_CONTENT_ID) or "").strip():
+        if int(att.PropertyAccessor.GetProperty(_PR_ATTACH_FLAGS) or 0) & _ATT_MHTML_REF:
             return True
+    except Exception:
+        pass
+    try:
+        if str(att.PropertyAccessor.GetProperty(_PR_ATTACH_CONTENT_ID) or "").strip():
+            return str(_safe_get(lambda: att.FileName) or "").lower().endswith(_IMAGE_EXTENSIONS)
     except Exception:
         pass
     return False
@@ -1552,6 +1671,7 @@ async def draft_forward(
     forward_latest_in_thread: bool = True,
     include_thread_attachments: bool = False,
     attachments: str = "",
+    inline_notes: str = "",
 ) -> str:
     """Forward an email as a draft. It is NOT sent.
 
@@ -1595,6 +1715,14 @@ async def draft_forward(
             Default false.
         attachments: Optional. Full path(s) of file(s) on this PC to attach in
             addition, separated by semicolons.
+        inline_notes: Optional. Comments written inside the forwarded message,
+            each right under the paragraph it refers to, in the inline_color
+            setting (dark red): a JSON array of {"after": <phrase copied from
+            the message>, "text": <comment>}, exactly as draft_reply's
+            inline_replies. For "forward Mitch's email to Chris with my
+            comments under each point"; body is then short ("My notes in red
+            below."). Preview in the chat as pairs. update_draft's
+            inline_replies revises them.
 
     Returns:
         JSON with status "draft_saved", sent=false, entry_id of the draft, its
@@ -1604,7 +1732,13 @@ async def draft_forward(
         user where the draft is.
     """
     def _forward(outlook, namespace, entry_id, to, body, cc, bcc, account,
-                 forward_latest_in_thread, include_thread_attachments, attachments):
+                 forward_latest_in_thread, include_thread_attachments, attachments, inline_notes):
+        try:
+            notes = _parse_inline_replies(inline_notes)
+        except ValueError as e:
+            return json.dumps({"error": str(e).replace("inline_replies", "inline_notes")})
+        if notes and plain_text_mode():
+            return json.dumps({"error": "inline_notes needs HTML drafts; the plain_text setting is on."})
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
@@ -1668,18 +1802,22 @@ async def draft_forward(
                         "from_entry_id": str(_safe_get(lambda: node.EntryID) or ""),
                     })
 
-        files = _attach_files(fwd, attachments)
-        _write_draft_text(fwd, body)
-        source_id = str(_safe_get(lambda: source.EntryID) or "")
-        newest_id = str(_safe_get(lambda: thread[-1][1].EntryID) or "") if thread else source_id
         try:
+            files = _attach_files(fwd, attachments)
+            if notes:
+                missing = _write_inline_answers(fwd, notes)
+                if missing:
+                    return _inline_error(missing).replace("inline_replies", "inline_notes")
+            _write_draft_text(fwd, body)
+            source_id = str(_safe_get(lambda: source.EntryID) or "")
+            newest_id = str(_safe_get(lambda: thread[-1][1].EntryID) or "") if thread else source_id
             return _save_draft(
                 fwd, "forward",
                 forwarded_entry_id=source_id,
                 forwarded_subject=str(_safe_get(lambda: source.Subject) or ""),
                 forwarded_is_latest=(source_id == newest_id),
                 to=str(_safe_get(lambda: fwd.To) or ""), cc=str(_safe_get(lambda: fwd.CC) or ""),
-                attachments_added=attachments_added, files_attached=files,
+                attachments_added=attachments_added, files_attached=files, inline_notes=len(notes),
             )
         finally:
             if tmpdir:
@@ -1688,7 +1826,7 @@ async def draft_forward(
     try:
         return await bridge.call(
             _forward, entry_id, to, body, cc, bcc, account,
-            forward_latest_in_thread, include_thread_attachments, attachments,
+            forward_latest_in_thread, include_thread_attachments, attachments, inline_notes,
         )
     except Exception as e:
         return f"Error writing forward draft: {format_com_error(e)}"
@@ -1828,11 +1966,13 @@ async def search_emails(
     match: str = "any",
     account: str = "",
     flagged_only: bool = False,
+    attachment_name: str = "",
 ) -> str:
     """Find emails in the user's main mailbox (Outlook) by a word or name in the
-    subject, sender or recipients, by sender alone, by date, and/or by
-    follow-up flag. Fast: Outlook does the filtering, well under a second even
-    in a 10,000-message folder.
+    subject, sender or recipients, by sender alone, by date, by follow-up flag,
+    and/or by the name of an attached file. Fast: Outlook does the filtering,
+    well under a second even in a 10,000-message folder (attachment names are
+    the exception; see below).
 
     Start here for "find the email from X", "the thread about Y" or "my history
     with company Z". One call covers it: query= with folder="all" matches the
@@ -1880,6 +2020,13 @@ async def search_emails(
         flagged_only: If true, only emails flagged for follow-up in Outlook and
             not yet marked complete. May stand alone (no query or sender) for
             "my flagged emails". Default false.
+        attachment_name: Optional. Case-insensitive substring of an attached
+            file's name, e.g. "redline", "EA" or ".pdf" ("the EA redline Mitch
+            sent"). Outlook cannot filter on this itself: the search narrows to
+            messages with attachments, then opens each to read the names, so
+            give it a sender, a date range or one folder rather than
+            folder="all" on a big mailbox. May stand alone. Matching results
+            list their attachments.
 
     Returns:
         JSON array of matching email summaries. If the time limit cut the search
@@ -1888,11 +2035,11 @@ async def search_emails(
         "accounts_skipped": [...], "elapsed_s": ...} instead.
     """
     def _search(outlook, namespace, query, folder, count, start_date, end_date,
-                sender, include_subfolders, include_body, match, account, flagged_only):
+                sender, include_subfolders, include_body, match, account, flagged_only, attachment_name):
         t0 = time.perf_counter()
         count = min(max(1, count), 200)
-        if not query and not sender and not flagged_only:
-            return json.dumps({"error": "Provide a query, a sender, flagged_only, or a combination"})
+        if not query and not sender and not flagged_only and not attachment_name:
+            return json.dumps({"error": "Provide a query, a sender, flagged_only, attachment_name, or a combination"})
         mode = (match or "any").strip().lower()
         if mode not in ("any", "subject"):
             return json.dumps({"error": f"match must be \"any\" or \"subject\", got {match!r}"})
@@ -1915,17 +2062,20 @@ async def search_emails(
             dasl_parts.append(dasl.received_until(datetime.now()))
         if flagged_only:
             dasl_parts.append(dasl.flagged_filter())
+        if attachment_name:
+            dasl_parts.append(dasl.has_attachment_filter())
 
         filter_str = dasl.sql(*dasl_parts)
         results, partial = _collect_across_stores(namespace, stores, folder, include_subfolders,
-                                                  filter_str, count, sender)
+                                                  filter_str, count, sender, attachment_name)
         if isinstance(results, str):
             return results
         return _results_json(results, partial, skipped, time.perf_counter() - t0)
 
     try:
         return await bridge.call(_search, query, folder, count, start_date, end_date,
-                                 sender, include_subfolders, include_body, match, account, flagged_only)
+                                 sender, include_subfolders, include_body, match, account, flagged_only,
+                                 attachment_name)
     except Exception as e:
         return f"Error searching emails: {format_com_error(e)}"
 
@@ -1940,6 +2090,13 @@ async def search_emails(
 def _parse_date(date_str: str) -> datetime:
     """Parse ISO 8601 date string like '2026-02-25 14:00' or '2026-02-25T14:00:00'."""
     return datetime.fromisoformat(date_str)
+
+
+def _com_date(date_str: str) -> str:
+    """A tool's ISO 8601 argument as the string Outlook's date properties accept. A string
+    on purpose: pywin32 shifts a naive datetime by the UTC offset on its way into COM
+    (a 09:00 appointment lands at 16:00), and Outlook rejects ISO's "T" separator."""
+    return _parse_date(date_str).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # --- Helper: events from one or more calendar folders ---
@@ -2127,7 +2284,14 @@ async def get_event(entry_id: str, account: str = "") -> str:
     """Read the full details of a specific calendar event.
 
     Retrieves complete event information including body/description,
-    attendees, recurrence status, reminders, and response status.
+    reminders, the user's own response_status, and for a meeting every
+    attendee with their response plus `responses` grouped as accepted,
+    tentative, declined and no_response ("who hasn't accepted Thursday's
+    call?"). Responses are tracked only for meetings the user organises
+    (responses_tracked); on a received meeting other attendees show "none".
+    A recurring event carries recurrence (type, interval, days, start, end
+    or count) and recurrence_summary; an occurrence's entry_id opens the
+    series master, so this describes the whole series.
 
     Args:
         entry_id: The unique Outlook EntryID of the event. Get this from
@@ -2167,20 +2331,27 @@ async def create_event(
     reminder_minutes: int = 15,
     categories: str = "",
     account: str = "",
+    recurrence: str = "",
 ) -> str:
     """Create a personal appointment (no attendees) on the user's primary calendar (Outlook).
 
     Creates and saves an appointment on the user's calendar. This is a
     personal event with no attendees. Use draft_meeting instead if you need
-    to invite people (the invitations are prepared, not sent).
+    to invite people (the invitations are prepared, not sent). With
+    recurrence it creates a series ("weekly check-in on Tuesdays").
 
     Args:
         subject: The event title.
         start: Start time in ISO 8601 format. Examples: "2026-02-25 14:00",
             "2026-02-25T14:00:00". For all-day events, use just the date:
-            "2026-02-25".
+            "2026-02-25". For a series, the first occurrence.
         end: End time in ISO 8601 format. For all-day events, use the next
             day: "2026-02-26".
+        recurrence: Optional. "daily", "weekly" (on start's weekday),
+            "weekdays", "monthly" (on start's day) or "yearly", with no end;
+            or JSON for more: {"type": "weekly", "interval": 2, "days":
+            ["tue", "thu"], "until": "2026-12-31"} or "count": 10 instead of
+            until, "day_of_month" for monthly.
         location: Optional. Event location text (e.g. "Conference Room A").
             This server cannot create a Teams link; see draft_meeting.
         body: Optional. Description or notes for the event.
@@ -2199,12 +2370,16 @@ async def create_event(
         Confirmation with event subject, entry_id and categories, or an error.
     """
     def _create(outlook, namespace, subject, start, end, location, body,
-                all_day, reminder_minutes, categories, account):
+                all_day, reminder_minutes, categories, account, recurrence):
+        try:
+            spec = recurrence_mod.parse(recurrence, _parse_date(start)) if recurrence else None
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
         store = _require_store(namespace, account)
         appt = store.GetDefaultFolder(OL_FOLDER_CALENDAR).Items.Add(OL_APPOINTMENT_ITEM)
         appt.Subject = subject
-        appt.Start = start
-        appt.End = end
+        appt.Start = _com_date(start)
+        appt.End = _com_date(end)
         if location:
             appt.Location = location
         if body:
@@ -2219,6 +2394,8 @@ async def create_event(
         if categories:
             appt.Categories = categories
             unknown = _unknown_categories(namespace, store, categories)
+        if spec:
+            recurrence_mod.apply(appt.GetRecurrencePattern(), spec, _parse_date(start), _parse_date(end))
         appt.Save()
         out = {
             "status": "created",
@@ -2229,6 +2406,8 @@ async def create_event(
             "categories": str(_safe_get(lambda: appt.Categories) or ""),
             "entry_id": appt.EntryID,
         }
+        if spec:
+            out["recurrence"] = recurrence_mod.summary(spec)
         if unknown:
             out["unknown_categories"] = unknown
             out["note"] = "Those categories are not on this account's list, so they show without a colour."
@@ -2237,7 +2416,7 @@ async def create_event(
     try:
         return await bridge.call(
             _create, subject, start, end, location, body, all_day,
-            reminder_minutes, categories, account,
+            reminder_minutes, categories, account, recurrence,
         )
     except Exception as e:
         return f"Error creating event: {format_com_error(e)}"
@@ -2258,6 +2437,7 @@ async def draft_meeting(
     optional_attendees: str = "",
     categories: str = "",
     account: str = "",
+    recurrence: str = "",
 ) -> str:
     """Prepare a meeting with attendees on the user's primary calendar (Outlook).
     Invitations are NOT sent.
@@ -2298,20 +2478,28 @@ async def draft_meeting(
         account: Optional. Account display name (or substring) whose calendar
             the meeting goes on and which it will be sent from. Default: primary
             account. Use list_accounts to see available accounts.
+        recurrence: Optional. Makes it a recurring meeting: "daily", "weekly"
+            (on start's weekday), "weekdays", "monthly", "yearly", or JSON
+            {"type": "weekly", "interval": 1, "days": ["tue"], "until":
+            "2026-12-31"} (or "count": 10). Same forms as create_event.
 
     Returns:
         JSON with status "draft_saved", sent=false, entry_id and the calendar
         folder. Tell the user the invitation is waiting for them to send.
     """
     def _draft(outlook, namespace, subject, start, end, required_attendees,
-               location, body, optional_attendees, categories, account):
+               location, body, optional_attendees, categories, account, recurrence):
+        try:
+            spec = recurrence_mod.parse(recurrence, _parse_date(start)) if recurrence else None
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
         store = _require_store(namespace, account)
         appt = store.GetDefaultFolder(OL_FOLDER_CALENDAR).Items.Add(OL_APPOINTMENT_ITEM)
         if account:
             _set_sending_account(appt, outlook, store)
         appt.Subject = subject
-        appt.Start = start
-        appt.End = end
+        appt.Start = _com_date(start)
+        appt.End = _com_date(end)
         appt.MeetingStatus = OL_MEETING
         if location:
             appt.Location = location
@@ -2339,6 +2527,9 @@ async def draft_meeting(
             extra["categories"] = categories
             if unknown:
                 extra["unknown_categories"] = unknown
+        if spec:
+            recurrence_mod.apply(appt.GetRecurrencePattern(), spec, _parse_date(start), _parse_date(end))
+            extra["recurrence"] = recurrence_mod.summary(spec)
         return _save_draft(
             appt, "meeting",
             start=str(appt.Start), end=str(appt.End),
@@ -2349,7 +2540,7 @@ async def draft_meeting(
     try:
         return await bridge.call(
             _draft, subject, start, end, required_attendees, location, body,
-            optional_attendees, categories, account,
+            optional_attendees, categories, account, recurrence,
         )
     except Exception as e:
         return f"Error preparing meeting: {format_com_error(e)}"
@@ -2369,6 +2560,7 @@ async def update_event(
     body: str = "",
     categories: str = "",
     account: str = "",
+    occurrence_date: str = "",
 ) -> str:
     """Update an existing calendar event.
 
@@ -2376,6 +2568,9 @@ async def update_event(
     provide will be updated; omitted fields remain unchanged. The change is
     saved, not sent: for a meeting the user organises, attendees are not
     notified until the user opens it in Outlook and presses Send Update.
+
+    On a recurring series the change applies to every occurrence unless
+    occurrence_date names one; the result's scope says which happened.
 
     Args:
         entry_id: The unique Outlook EntryID of the event to update.
@@ -2390,11 +2585,16 @@ async def update_event(
             applied without a colour and reported under unknown_categories.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
+        occurrence_date: Optional, recurring series only. The date of the one
+            occurrence to change ("2026-11-10"; add a time when the series
+            has several a day). The rest of the series is untouched.
 
     Returns:
-        Confirmation with updated event details, or an error.
+        Confirmation with updated event details and scope ("event",
+        "occurrence" or "series"), or an error.
     """
-    def _update(outlook, namespace, entry_id, subject, start, end, location, body, categories, account):
+    def _update(outlook, namespace, entry_id, subject, start, end, location, body, categories, account,
+                occurrence_date):
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
@@ -2403,30 +2603,42 @@ async def update_event(
             store = _safe_get(lambda: item.Parent.Store) or _require_store(namespace, "")
         if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
             return err
+        target, scope = item, "event"
+        if bool(_safe_get(lambda: item.IsRecurring, False)):
+            if occurrence_date:
+                target, err = _occurrence_of(item, occurrence_date)
+                if err:
+                    return err
+                scope = "occurrence"
+            else:
+                scope = "series"
         if subject:
-            item.Subject = subject
+            target.Subject = subject
         if start:
-            item.Start = start
+            target.Start = _com_date(start)
         if end:
-            item.End = end
+            target.End = _com_date(end)
         if location:
-            item.Location = location
+            target.Location = location
         if body:
-            item.Body = body
+            target.Body = body
         unknown = []
         if categories:
-            item.Categories = "" if categories.strip() == "-" else categories
-            unknown = _unknown_categories(namespace, store, item.Categories or "")
-        item.Save()
+            target.Categories = "" if categories.strip() == "-" else categories
+            unknown = _unknown_categories(namespace, store, target.Categories or "")
+        target.Save()
         out = {
             "status": "updated",
-            "subject": item.Subject,
-            "start": str(item.Start),
-            "end": str(item.End),
-            "location": item.Location or "",
-            "categories": str(_safe_get(lambda: item.Categories) or ""),
+            "scope": scope,
+            "subject": target.Subject,
+            "start": str(target.Start),
+            "end": str(target.End),
+            "location": target.Location or "",
+            "categories": str(_safe_get(lambda: target.Categories) or ""),
             "entry_id": item.EntryID,
         }
+        if scope == "series":
+            out["note"] = "This is a recurring series, so the change applies to every occurrence. Pass occurrence_date to change one."
         if unknown:
             out["unknown_categories"] = unknown
             out["note"] = "Those categories are not on this account's list, so they show without a colour."
@@ -2434,7 +2646,7 @@ async def update_event(
 
     try:
         return await bridge.call(
-            _update, entry_id, subject, start, end, location, body, categories, account,
+            _update, entry_id, subject, start, end, location, body, categories, account, occurrence_date,
         )
     except Exception as e:
         return f"Error updating event: {format_com_error(e)}"
@@ -2444,8 +2656,30 @@ async def update_event(
 # TOOL 15: delete_event
 # =====================================================================
 
+def _occurrence_of(item, occurrence_date: str):
+    """``(occurrence, None)`` of recurring ``item`` starting on ``occurrence_date`` (a date,
+    or a date and time when the series has several a day), else ``(None, error_json)``."""
+    try:
+        when = _parse_date(occurrence_date)
+    except ValueError:
+        return None, json.dumps({"error": f"occurrence_date must be ISO 8601, e.g. 2026-11-10; got {occurrence_date!r}"})
+    if len(occurrence_date.strip()) <= 10:
+        base = to_local(item.Start) or when
+        when = when.replace(hour=base.hour, minute=base.minute, second=0, microsecond=0)
+    # A method argument has to be a datetime (strings are refused), and pywin32 converts a
+    # naive or local-zoned one to UTC on the way in while Outlook reads the result as wall
+    # time. Labelling the local wall time as UTC makes that conversion a no-op.
+    try:
+        return item.GetRecurrencePattern().GetOccurrence(when.replace(tzinfo=timezone.utc)), None
+    except Exception:
+        return None, json.dumps({
+            "error": f"'{item.Subject}' has no occurrence starting {when.strftime('%Y-%m-%d %H:%M')}.",
+            "entry_id": str(item.EntryID),
+        })
+
+
 @mcp.tool()
-async def delete_event(entry_id: str, account: str = "") -> str:
+async def delete_event(entry_id: str, account: str = "", occurrence_date: str = "", whole_series: bool = False) -> str:
     """Delete a personal appointment or a received meeting from the calendar.
 
     Nothing is sent. Meetings the user organises (including unsent ones made
@@ -2454,15 +2688,23 @@ async def delete_event(entry_id: str, account: str = "") -> str:
     Deleting a received meeting removes it from the calendar without sending
     a response to the organiser.
 
+    A recurring series is never deleted by accident: for one, say which
+    occurrence (occurrence_date) or that the whole series should go
+    (whole_series=true); without either the tool refuses and says so.
+
     Args:
         entry_id: The unique Outlook EntryID of the event to delete.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
+        occurrence_date: Optional, recurring series only. The date of the one
+            occurrence to delete ("2026-11-10"; add a time when the series
+            has several a day).
+        whole_series: Recurring series only. True deletes every occurrence.
 
     Returns:
         Confirmation with the event subject, or an error.
     """
-    def _delete(outlook, namespace, entry_id, account):
+    def _delete(outlook, namespace, entry_id, account, occurrence_date, whole_series):
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
@@ -2471,6 +2713,7 @@ async def delete_event(entry_id: str, account: str = "") -> str:
         if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
             return err
         subject = item.Subject
+        recurring = bool(_safe_get(lambda: item.IsRecurring, False))
 
         if item.MeetingStatus == OL_MEETING:
             return (
@@ -2479,11 +2722,29 @@ async def delete_event(entry_id: str, account: str = "") -> str:
                 "or discard it in Outlook."
             )
 
+        if recurring and occurrence_date:
+            occ, err = _occurrence_of(item, occurrence_date)
+            if err:
+                return err
+            when = iso(occ.Start) or str(occ.Start)
+            occ.Delete()
+            return f"Occurrence deleted: '{subject}' on {when}; the rest of the series is unchanged"
+        if recurring and not whole_series:
+            try:
+                desc = recurrence_mod.summary(recurrence_mod.describe(item.GetRecurrencePattern()))
+            except Exception:
+                desc = "recurring"
+            return json.dumps({
+                "error": f"'{subject}' is a recurring series ({desc}). Pass occurrence_date to delete one "
+                         "occurrence, or whole_series=true to delete them all.",
+                "entry_id": str(item.EntryID),
+            })
+
         item.Delete()
-        return f"Event deleted: '{subject}'"
+        return f"Event deleted: '{subject}'" + (" (whole series)" if recurring else "")
 
     try:
-        return await bridge.call(_delete, entry_id, account)
+        return await bridge.call(_delete, entry_id, account, occurrence_date, whole_series)
     except Exception as e:
         return f"Error deleting event: {format_com_error(e)}"
 

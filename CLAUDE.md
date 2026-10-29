@@ -120,6 +120,12 @@ Give five or six examples tuned to the accounts you just saw, for instance:
 
 - "Show me unread email in my work inbox from the last two days."
 - "What have I flagged?" `list_emails` with `flagged_only`; every summary carries `flagged`.
+  "Flag that for Friday" is `set_flag`.
+- "Who hasn't accepted Thursday's call?" `get_event` groups attendee responses for meetings
+  they organise.
+- "Set up a weekly check-in with Chris, Tuesdays at 9." `draft_meeting` with `recurrence`;
+  `create_event` takes it too. Deleting a series needs `occurrence_date` or `whole_series`.
+- "Find the EA redline Mitch sent." `search_emails` with `attachment_name` and a sender.
 - "Read the newest one and give me the whole thread."
 - "What's on all my calendars Tuesday and Wednesday?"
 - "What does the lease in that email say about assignment?" Claude reads the PDF with

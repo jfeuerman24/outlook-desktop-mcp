@@ -3,6 +3,42 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## 0.11.0 - 2026-10-29
+
+### Added
+- **`set_flag`**: flag an email for follow-up (no date, today, tomorrow, this week, next
+  week, or a date), mark the flag complete, or clear it. Outlook refuses to flag drafts.
+- **Inline notes on forwards.** `draft_forward` takes `inline_notes`, the same
+  `{"after", "text"}` list as `draft_reply`'s `inline_replies`, for "forward this to Chris
+  with my comments under each point". `update_draft` revises them.
+- **Attendee responses.** `get_event` lists every attendee with their response and groups
+  them (`responses`: accepted, tentative, declined, no_response). Outlook tracks responses
+  only for the organiser; `responses_tracked` says whether they mean anything here.
+- **Recurring events.** `create_event` and `draft_meeting` take `recurrence`: `daily`,
+  `weekly`, `weekdays`, `monthly`, `yearly`, or JSON with `interval`, `days`, `until` or
+  `count`. `get_event` describes a series (`recurrence`, `recurrence_summary`). `update_event`
+  changes one occurrence with `occurrence_date` and otherwise the whole series (the result
+  says which). `delete_event` on a series now refuses unless told `occurrence_date` or
+  `whole_series`; before, an occurrence's entry_id deleted the whole series without a word.
+- **Find mail by attachment name.** `search_emails` takes `attachment_name`. Outlook cannot
+  filter on it, so the search narrows to messages with attachments and reads each one's
+  file names (up to 1,500 per folder, within the time limit); matches list their
+  `attachments`. Pair it with a sender or a date range.
+
+### Fixed
+- Real attachments from Exchange Online senders were taken for inline pictures. Exchange
+  stamps a Content-ID on every attachment, and the inline test treated any Content-ID as
+  "embedded picture", so `draft_forward` with `include_thread_attachments` silently skipped a
+  law firm's .docx and .pdf files and the new name search could not see them. The hidden
+  property and the body-reference flag now decide; a Content-ID alone counts only for
+  picture files.
+- `create_event`, `draft_meeting` and `update_event` accept ISO 8601 with a "T" separator,
+  as their descriptions always claimed; Outlook rejected it. Dates now reach Outlook as
+  strings it parses itself: pywin32 converts a naive `datetime` from local time to UTC on
+  the way into COM, and Outlook reads the result as wall time, so a 09:00 appointment
+  landed at 16:00. (`GetOccurrence` needs a datetime, so it gets the wall time labelled
+  UTC, which makes that conversion a no-op.)
+
 ## 0.10.0 - 2026-10-29
 
 ### Added
