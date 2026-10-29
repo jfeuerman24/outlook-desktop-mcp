@@ -34,10 +34,11 @@ def plain_text_mode() -> bool:
     return bool(settings.get("plain_text"))
 
 
-def font_style() -> str:
+def font_style(color: str = "") -> str:
+    """The inline CSS for text the server writes; ``color`` overrides the font_color setting."""
     family = str(settings.get("font_family") or DEFAULT_FAMILY).strip() or DEFAULT_FAMILY
     size = str(settings.get("font_size_pt") or DEFAULT_SIZE_PT).strip() or DEFAULT_SIZE_PT
-    color = str(settings.get("font_color") or DEFAULT_COLOR).strip() or DEFAULT_COLOR
+    color = (color or "").strip() or str(settings.get("font_color") or DEFAULT_COLOR).strip() or DEFAULT_COLOR
     return f"font-family:{family},Calibri,sans-serif;font-size:{size}pt;color:{color}"
 
 
@@ -63,7 +64,7 @@ def _blank(style: str) -> str:
     return f'<p style="margin:0;line-height:100%;{style}"><span style="{style}">&nbsp;</span></p>'
 
 
-def text_to_html(text: str) -> str:
+def text_to_html(text: str, color: str = "") -> str:
     """Turn plain text into styled, single-spaced HTML, understanding a little structure.
 
     Every line is exactly one line (``line-height:100%``, no paragraph spacing) and a
@@ -73,9 +74,9 @@ def text_to_html(text: str) -> str:
     ``-``, ``*`` or ``\u2022`` a bulleted list; a line without a marker continues the
     previous item on its own line. A paragraph whose lines start with ``>`` is indented
     (useful for text the reader should copy). ``**bold**`` works anywhere. Everything
-    else is escaped literally.
+    else is escaped literally. ``color`` overrides the font_color setting.
     """
-    style = font_style()
+    style = font_style(color)
     normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     paragraphs = re.split(r"\n\s*\n", normalized) if normalized else [""]
     line = f"margin:0;line-height:100%;{style}"
@@ -155,3 +156,123 @@ def replace_note(document: str, fragment: str) -> str | None:
         return None
     start, end = span
     return document[:start] + wrap_note(fragment) + document[end:]
+
+
+# ---------------------------------------------------------------------------
+# Inline answers: text written inside the quoted message, under the paragraph it
+# answers, in its own colour, the way people answer a numbered list point by point.
+# An anchor is a phrase as the reader sees it; it is looked for in the visible text
+# of the HTML, so tags, entities and Word's curly quotes in between do not matter.
+# Every block written carries INLINE_CLASS so update_draft can remove and rewrite them.
+# ---------------------------------------------------------------------------
+INLINE_CLASS = "outlook-mcp-inline"
+DEFAULT_INLINE_COLOR = "#C00000"
+
+_TOKEN = re.compile(
+    r"<!--.*?-->|<(style|script|head)\b.*?</\1\s*>|<[^>]*>|&[#A-Za-z0-9]+;|[^<&]+|&",
+    re.I | re.S,
+)
+_BREAK_TAG = re.compile(r"</?(p|div|li|tr|td|th|h[1-6]|ul|ol|table|blockquote|pre)\b|<br\b", re.I)
+_BLOCK_END = re.compile(r"</(p|div|h[1-6])\s*>|</(li|td)\s*>|<br\b[^>]*>", re.I)
+_BODY_CLOSE = re.compile(r"</body\s*>", re.I)
+_PUNCT = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"',
+                        "–": "-", "—": "-", "\xa0": " "})
+_INLINE_BLOCK = re.compile(
+    r"\s*<(p|ol|ul|span)\b[^>]*\bclass\s*=\s*[\"']?" + INLINE_CLASS + r"\b[^>]*>.*?</\1\s*>(?:\s*<br\b[^>]*>)?\s*",
+    re.I | re.S,
+)
+
+
+def normalize_anchor(text: str) -> str:
+    """Lower-case, straight quotes, single spaces: how anchors and visible text are compared."""
+    return re.sub(r"\s+", " ", (text or "").translate(_PUNCT)).strip().lower()
+
+
+def _visible_text(document: str, start: int) -> tuple[str, list[int]]:
+    """The text a reader sees in ``document[start:]``, normalised like ``normalize_anchor``,
+    and for each character the offset in ``document`` just past its source."""
+    chars: list[str] = []
+    ends: list[int] = []
+
+    def emit(ch: str, end: int) -> None:
+        ch = ch.translate(_PUNCT)
+        if ch.isspace():
+            if not chars or chars[-1] == " ":
+                return
+            ch = " "
+        chars.append(ch.lower())
+        ends.append(end)
+
+    for m in _TOKEN.finditer(document, start):
+        tok = m.group(0)
+        if tok.startswith("<"):
+            if _BREAK_TAG.match(tok):
+                emit(" ", m.end())
+            continue
+        if tok.startswith("&") and len(tok) > 1:
+            for ch in html.unescape(tok):
+                emit(ch, m.end())
+            continue
+        for i, ch in enumerate(tok):
+            emit(ch, m.start() + i + 1)
+    return "".join(chars), ends
+
+
+def find_anchor(document: str, anchor: str, start: int = 0) -> int | None:
+    """Offset in ``document`` just past the first occurrence of ``anchor`` at or after
+    ``start``, matched on the visible text; None when it is not there."""
+    needle = normalize_anchor(anchor)
+    if not needle:
+        return None
+    text, ends = _visible_text(document, start)
+    idx = text.find(needle)
+    if idx < 0:
+        return None
+    return ends[idx + len(needle) - 1]
+
+
+def inline_html(text: str, color: str) -> tuple[str, str]:
+    """Two renderings of one inline answer, both tagged with INLINE_CLASS: a block (styled
+    paragraphs, for after a paragraph) and a line (a span and a <br>, for after a <br>)."""
+    style = font_style(color)
+    block = re.sub(r"<(p|ol|ul) style=", rf'<\1 class="{INLINE_CLASS}" style=', text_to_html(text, color))
+    lines = [_inline(ln.strip()) for ln in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    line = f'<span class="{INLINE_CLASS}" style="{style}">' + "<br>".join(lines) + "</span><br>"
+    return block, line
+
+
+def insert_inline(document: str, answers, color: str = DEFAULT_INLINE_COLOR) -> tuple[str, list[str]]:
+    """Write each ``(anchor, text)`` answer into ``document`` after the block that contains
+    the anchor: after the closing ``</p>``/``</div>``, inside a ``</li>``/``</td>``, or as a
+    line after a ``<br>``. Each search starts where the previous answer went in, so a
+    phrase that repeats resolves in document order. Returns the new document and the
+    anchors not found; when any is missing the document comes back unchanged."""
+    out = document or ""
+    cursor = 0
+    missing: list[str] = []
+    for anchor, text in answers:
+        pos = find_anchor(out, anchor, cursor)
+        if pos is None:
+            missing.append(anchor)
+            continue
+        block, line = inline_html(text, color)
+        m = _BLOCK_END.search(out, pos)
+        if m is None:
+            end = _BODY_CLOSE.search(out, pos)
+            insert_at, fragment = (end.start() if end else len(out)), block
+        elif m.group(1):
+            insert_at, fragment = m.end(), block
+        elif m.group(2):
+            insert_at, fragment = m.start(), block
+        else:
+            insert_at, fragment = m.end(), line
+        out = out[:insert_at] + fragment + out[insert_at:]
+        cursor = insert_at + len(fragment)
+    if missing:
+        return document or "", missing
+    return out, []
+
+
+def strip_inline(document: str) -> str:
+    """``document`` without the inline answers written earlier (by INLINE_CLASS)."""
+    return _INLINE_BLOCK.sub("", document or "")

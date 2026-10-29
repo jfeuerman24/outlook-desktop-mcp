@@ -48,6 +48,17 @@ def _safe(getter, default=""):
         return default
 
 
+def _flag(item) -> dict:
+    """``flagged`` (a follow-up flag that is not complete) and, when it is, ``flag_due``
+    (the flag's date, or None for a flag without one)."""
+    status = int(_safe(lambda: item.FlagStatus, 0) or 0)
+    out = {"flagged": status == 2}
+    if status == 2:
+        due = _safe(lambda: item.TaskDueDate, None)
+        out["flag_due"] = iso_date(due) if due is not None and getattr(due, "year", 4501) < 4000 else None
+    return out
+
+
 def format_email_summary(item) -> dict:
     """Extract key fields from an Outlook MailItem into a dict."""
     return {
@@ -58,6 +69,7 @@ def format_email_summary(item) -> dict:
         "received_time": iso(_safe(lambda: item.ReceivedTime, None)),
         "folder": _folder_path(item),
         "unread": bool(item.UnRead),
+        **_flag(item),
         "has_attachments": bool(item.Attachments.Count > 0),
         "attachment_count": item.Attachments.Count,
         "conversation_id": str(_safe(lambda: item.ConversationID)),

@@ -53,6 +53,9 @@ SETTINGS: dict[str, dict] = {
                    "help": "Font colour for draft text."},
     "plain_text": {"env": "OUTLOOK_MCP_PLAIN_TEXT", "type": "bool", "default": False,
                    "help": "Write drafts as plain text instead of styled HTML."},
+    "inline_color": {"env": "OUTLOOK_MCP_INLINE_COLOR", "type": "str", "default": "#C00000",
+                     "help": "Colour of answers draft_reply writes inside the quoted message "
+                             "(inline_replies). Default dark red."},
     "include_shared_in_all": {
         "env": "OUTLOOK_MCP_INCLUDE_SHARED_IN_ALL", "type": "bool", "default": False,
         "help": "Include shared Exchange mailboxes that are not cached locally in account=\"all\" "

@@ -119,11 +119,14 @@ per search.
 Give five or six examples tuned to the accounts you just saw, for instance:
 
 - "Show me unread email in my work inbox from the last two days."
+- "What have I flagged?" `list_emails` with `flagged_only`; every summary carries `flagged`.
 - "Read the newest one and give me the whole thread."
 - "What's on all my calendars Tuesday and Wednesday?"
 - "What does the lease in that email say about assignment?" Claude reads the PDF with
   `read_attachment`; nothing is saved or opened.
 - "When did we last hear from Chad?" `contact_history` covers every account and calendar.
+- "Answer Mitch's five points inline, in red." `draft_reply` with `inline_replies` writes each
+  answer under its point inside the quoted message; "See below." goes above the thread.
 - "Draft a reply saying I can do Thursday." You first show a few lines about the thread and the
   recipients Outlook would use, then the reply; once they agree it lands in Drafts, where they
   open it and press Send.

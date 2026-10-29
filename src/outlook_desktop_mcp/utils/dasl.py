@@ -22,6 +22,12 @@ DISPLAY_TO = "urn:schemas:httpmail:displayto"
 DISPLAY_CC = "urn:schemas:httpmail:displaycc"
 DISPLAY_BCC = "urn:schemas:httpmail:displaybcc"
 DATE_RECEIVED = "urn:schemas:httpmail:datereceived"
+READ = "urn:schemas:httpmail:read"
+# A follow-up flag is a task on the message (Outlook 2007+): PidLidTaskComplete is false while
+# the flag is open and true once it is marked complete. PR_FLAG_STATUS = 2 is the older,
+# pre-task form of the same flag and is kept for messages written that way.
+TASK_COMPLETE = "http://schemas.microsoft.com/mapi/id/{00062003-0000-0000-C000-000000000046}/811C000B"
+FLAG_STATUS = "http://schemas.microsoft.com/mapi/proptag/0x10900003"
 
 SENDER_PROPS = (FROM_NAME, FROM_EMAIL, SENDER_SMTP)
 RECIPIENT_PROPS = (DISPLAY_TO, DISPLAY_CC, DISPLAY_BCC)
@@ -128,6 +134,15 @@ def received_since(when: datetime) -> str:
 
 def received_until(when: datetime) -> str:
     return f"\"{DATE_RECEIVED}\" <= '{jet_date(when)}'"
+
+
+def unread_filter() -> str:
+    return f"\"{READ}\" = 0"
+
+
+def flagged_filter() -> str:
+    """Messages flagged for follow-up and not yet marked complete."""
+    return f"(\"{TASK_COMPLETE}\" = 0 OR \"{FLAG_STATUS}\" = 2)"
 
 
 def looks_like_address(needle: str) -> bool:

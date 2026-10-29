@@ -38,7 +38,8 @@ from outlook_desktop_mcp.utils.addresses import classify_direction, format_recip
 from outlook_desktop_mcp.utils.dates import iso
 from outlook_desktop_mcp.utils.extract import extract
 from outlook_desktop_mcp.utils.html import (
-    inject_into_body, plain_text_mode, replace_note, style_html, text_to_html, wrap_note,
+    DEFAULT_INLINE_COLOR, inject_into_body, insert_inline, plain_text_mode, replace_note, strip_inline,
+    style_html, text_to_html, wrap_note,
 )
 from outlook_desktop_mcp.tools._folder_constants import (
     FOLDER_NAME_TO_ENUM,
@@ -144,7 +145,9 @@ _INSTRUCTIONS = (
     "already been summarised in this conversation; do not repeat it. Always use the To/CC "
     "from reply_context, which are Outlook's own, not a guess. thread_depth on every "
     "message says how deep in a thread it sits (0 = first message); get_conversation "
-    "shows the whole thread.\n\n"
+    "shows the whole thread. Point-by-point answers to a list of questions go inside the "
+    "quoted message with draft_reply's inline_replies (each in red under the point it "
+    "answers), never as a separate file.\n\n"
     + _INSTRUCTIONS_COMMON
     + "FINDING MAIL QUICKLY. Outlook filters by subject, sender, recipient and date in "
     "well under a second even in a 10,000-message folder. For \"find the email about X\" "
@@ -163,9 +166,10 @@ _INSTRUCTIONS = (
     "\"partial\": true stopped at the time limit; narrow the request instead of repeating "
     "it. elapsed_s in a result says how long that call took.\n\n"
     "AVAILABLE TOOL CATEGORIES:\n"
-    "- Email: list, read, search (sender/subject/body filters), get_conversation, "
-    "reply_context, contact_history, draft_email, draft_reply, draft_forward, "
-    "update_draft, open_in_outlook, mark read/unread, move, attachments\n"
+    "- Email: list, read, search (sender/subject/body/unread/flagged filters), get_conversation, "
+    "reply_context, contact_history, draft_email, draft_reply (text above the thread, or "
+    "inline_replies under each point), draft_forward, update_draft, open_in_outlook, "
+    "mark read/unread, move, attachments\n"
     "- Calendar: list_calendars, list events, create appointments, draft_meeting "
     "(invitations unsent), draft_forward_event (an invitation forwarded, unsent), "
     "move_event (to another calendar or account), update, delete (not organised "
@@ -486,6 +490,56 @@ def _write_draft_text(item, body: str, html_body: str = "") -> None:
     item.HTMLBody = inject_into_body(str(_safe_get(lambda: item.HTMLBody) or ""), fragment)
 
 
+def _parse_inline_replies(raw: str) -> list[tuple[str, str]]:
+    """The ``inline_replies`` JSON as ``[(anchor, text)]``; ValueError says what is wrong."""
+    if not (raw or "").strip():
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception as e:
+        raise ValueError(f'inline_replies must be a JSON array of {{"after": ..., "text": ...}}: {e}')
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        raise ValueError('inline_replies must be a JSON array of {"after": ..., "text": ...}')
+    out = []
+    for i, entry in enumerate(data):
+        if (not isinstance(entry, dict) or not str(entry.get("after") or "").strip()
+                or not str(entry.get("text") or "").strip()):
+            raise ValueError(f'inline_replies[{i}] needs a non-empty "after" (a phrase from the original) and "text"')
+        out.append((str(entry["after"]), str(entry["text"])))
+    return out
+
+
+def _write_inline_answers(item, answers) -> list[str]:
+    """Write point-by-point answers inside the quoted message of a reply, each under the
+    paragraph its anchor names and in the inline_color, replacing any written earlier.
+    Returns the anchors that were not found; nothing is written then."""
+    try:
+        item.GetInspector
+    except Exception:
+        pass
+    current = strip_inline(str(_safe_get(lambda: item.HTMLBody) or ""))
+    color = str(settings.get("inline_color") or DEFAULT_INLINE_COLOR)
+    new_html, missing = insert_inline(current, answers, color)
+    if missing:
+        try:
+            item.Close(1)  # olDiscard: drop the inspector, and a reply that was never saved
+        except Exception:
+            pass
+        return missing
+    item.HTMLBody = new_html
+    return []
+
+
+def _inline_error(missing: list[str]) -> str:
+    return json.dumps({
+        "error": "These inline_replies anchors are not in the quoted message, so nothing was saved. Copy each "
+                 "\"after\" phrase exactly from the message text (reply_context's message, or read_email's body).",
+        "anchors_not_found": missing,
+    }, indent=2)
+
+
 def _attach_files(item, paths: str) -> list[dict]:
     """Attach each file in the semicolon-separated ``paths`` to ``item``; returns what was attached."""
     added = []
@@ -505,7 +559,15 @@ def _save_draft(item, kind: str, where: str = "in the Drafts folder", **extra) -
     """Save ``item`` without sending, open it in Outlook if the open_in_outlook setting says
     drafts of this ``kind`` should open (by default only meetings do), describe the result.
     ``where`` says where the item sits when it was not opened.
+
+    The draft is saved read, as Outlook's own are, and the hidden inspector that
+    ``GetInspector`` created to fill it is closed afterwards; left open, the reading pane
+    shows the draft without its editor until the user opens and closes it once.
     """
+    try:
+        item.UnRead = False
+    except Exception:
+        pass
     item.Save()
     opened = False
     if settings.should_open(kind):
@@ -520,7 +582,7 @@ def _save_draft(item, kind: str, where: str = "in the Drafts folder", **extra) -
         folder = "/".join(parts[1:]) if len(parts) > 1 else (parts[0] if parts else "")
     except Exception:
         folder = ""
-    return json.dumps({
+    result = {
         "status": "draft_saved",
         "kind": kind,
         "sent": False,
@@ -531,7 +593,13 @@ def _save_draft(item, kind: str, where: str = "in the Drafts folder", **extra) -
         "note": ("Nothing has been sent. " + ("It is open in an Outlook window. " if opened else f"It is {where}, not opened. ")
                  + "The user checks it in Outlook and presses Send."),
         **extra,
-    }, indent=2, default=str)
+    }
+    if not opened:
+        try:
+            item.Close(0)  # olSave: releases the inspector; the item object is stale after this
+        except Exception as e:
+            logger.debug("Could not close the draft's hidden inspector: %s", e)
+    return json.dumps(result, indent=2, default=str)
 
 
 # =====================================================================
@@ -781,13 +849,14 @@ async def list_emails(
     sender: str = "",
     include_subfolders: bool = False,
     account: str = "",
+    flagged_only: bool = False,
 ) -> str:
     """List recent emails from a folder in the user's main mailbox (Outlook).
 
     Returns a JSON array of email summaries sorted by received time (newest
     first). Each summary includes entry_id, subject, sender (SMTP address),
-    sender_name, received_time (ISO 8601), folder, unread status, attachment
-    info and conversation_id.
+    sender_name, received_time (ISO 8601), folder, unread status, flagged
+    (a follow-up flag, with flag_due), attachment info and conversation_id.
 
     Use the entry_id from results to read full content with read_email,
     get_conversation for the whole thread, or actions like mark_as_read,
@@ -801,6 +870,8 @@ async def list_emails(
             Sent Items and Archive together.
         count: Maximum number of emails to return. Default 10, max 200.
         unread_only: If true, only return unread emails. Default false.
+        flagged_only: If true, only emails flagged for follow-up in Outlook and
+            not yet marked complete ("my flagged emails"). Default false.
         start_date: Optional. Only return emails received on or after this date.
             ISO 8601 format (e.g. "2026-03-10" or "2026-03-10 09:00").
         end_date: Optional. Only return emails received on or before this date.
@@ -821,34 +892,48 @@ async def list_emails(
         "partial": true, "note": ..., "accounts_skipped": [...]} instead.
     """
     def _list(outlook, namespace, folder, count, unread_only, start_date, end_date,
-              sender, include_subfolders, account):
+              sender, include_subfolders, account, flagged_only):
         t0 = time.perf_counter()
         count = min(max(1, count), 200)
         stores, skipped = _stores_for(namespace, account)
 
-        # Build restriction filters
-        restrictions = []
-        if unread_only:
-            restrictions.append("[UnRead] = True")
-        if start_date:
-            start = _parse_date(start_date)
-            restrictions.append(f"[ReceivedTime] >= '{start.strftime('%m/%d/%Y %H:%M')}'")
-        if end_date:
-            end = _parse_date(end_date)
-            restrictions.append(f"[ReceivedTime] <= '{end.strftime('%m/%d/%Y %H:%M')}'")
-        elif start_date:
-            # Default end to now when start is specified
-            restrictions.append(f"[ReceivedTime] <= '{datetime.now().strftime('%m/%d/%Y %H:%M')}'")
+        # Build restriction filters. The flag lives in a named MAPI property that only the
+        # DASL dialect can name, so a flagged listing is built in DASL throughout.
+        if flagged_only:
+            parts = [dasl.flagged_filter()]
+            if unread_only:
+                parts.append(dasl.unread_filter())
+            if start_date:
+                parts.append(dasl.received_since(_parse_date(start_date)))
+            if end_date:
+                parts.append(dasl.received_until(_parse_date(end_date)))
+            elif start_date:
+                parts.append(dasl.received_until(datetime.now()))
+            filter_str = dasl.sql(*parts)
+        else:
+            restrictions = []
+            if unread_only:
+                restrictions.append("[UnRead] = True")
+            if start_date:
+                start = _parse_date(start_date)
+                restrictions.append(f"[ReceivedTime] >= '{start.strftime('%m/%d/%Y %H:%M')}'")
+            if end_date:
+                end = _parse_date(end_date)
+                restrictions.append(f"[ReceivedTime] <= '{end.strftime('%m/%d/%Y %H:%M')}'")
+            elif start_date:
+                # Default end to now when start is specified
+                restrictions.append(f"[ReceivedTime] <= '{datetime.now().strftime('%m/%d/%Y %H:%M')}'")
+            filter_str = " AND ".join(restrictions)
 
         results, partial = _collect_across_stores(namespace, stores, folder, include_subfolders,
-                                                  " AND ".join(restrictions), count, sender)
+                                                  filter_str, count, sender)
         if isinstance(results, str):
             return results
         return _results_json(results, partial, skipped, time.perf_counter() - t0)
 
     try:
         return await bridge.call(_list, folder, count, unread_only, start_date, end_date,
-                                 sender, include_subfolders, account)
+                                 sender, include_subfolders, account, flagged_only)
     except Exception as e:
         return f"Error listing emails: {format_com_error(e)}"
 
@@ -1037,7 +1122,10 @@ async def reply_context(
     newest message asks), then the draft with the To/CC from this result, which
     are Outlook's own rather than a guess. Skip the Context block when the
     thread has already been summarised in this conversation; the To/CC from
-    this result are needed every time.
+    this result are needed every time. When the message is a list of questions
+    or points to answer one by one, draft_reply's inline_replies writes each
+    answer under its point inside the quoted message; take the anchor phrases
+    from ``message`` here.
 
     Args:
         entry_id: EntryID of the message to answer (from list_emails,
@@ -1333,6 +1421,7 @@ async def draft_reply(
     reply_all: bool = False,
     account: str = "",
     attachments: str = "",
+    inline_replies: str = "",
 ) -> str:
     """Write a reply to an email as a draft. It is NOT sent.
 
@@ -1352,6 +1441,14 @@ async def draft_reply(
     in Drafts without a window unless the open_in_outlook setting is "all"; the
     open_in_outlook tool opens it if the user asks.
 
+    POINT-BY-POINT ANSWERS GO INLINE. When the user wants to answer a list of
+    questions or points "inline", "in red" or "below each point", pass
+    inline_replies: each answer is written inside the quoted message, right
+    under the paragraph it answers, in the inline_color setting (dark red by
+    default), the way people answer a numbered list in Outlook. body is then
+    short ("See below."). Preview it in the chat as pairs: the quoted line,
+    then the answer marked (red). Never offer an HTML file for this instead.
+
     Args:
         entry_id: The unique Outlook EntryID of the email to reply to.
         body: The reply text, as plain prose; blank lines separate paragraphs.
@@ -1361,12 +1458,27 @@ async def draft_reply(
             if entry_id is ambiguous across stores.
         attachments: Optional. Full path(s) of file(s) on this PC to attach,
             separated by semicolons.
+        inline_replies: Optional. JSON array of {"after": ..., "text": ...}.
+            "after" is a short phrase copied exactly from the original message
+            (reply_context's message text or read_email's body; quotes and
+            spacing are forgiving); the answer goes right after the paragraph
+            or list item that contains it. Keep them in the order they appear:
+            each is looked for after the previous one, so a phrase that repeats
+            ("Confirm ok.") resolves in turn. If an anchor is not found nothing
+            is saved and the result lists it. Revise with update_draft, which
+            replaces all of them.
 
     Returns:
         JSON with status "draft_saved", sent=false, entry_id of the draft and
         the folder it is in. Tell the user the draft is waiting for them.
     """
-    def _reply(outlook, namespace, entry_id, body, reply_all, account, attachments):
+    def _reply(outlook, namespace, entry_id, body, reply_all, account, attachments, inline_replies):
+        try:
+            answers = _parse_inline_replies(inline_replies)
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+        if answers and plain_text_mode():
+            return json.dumps({"error": "inline_replies needs HTML drafts; the plain_text setting is on."})
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
@@ -1376,15 +1488,20 @@ async def draft_reply(
             return err
         reply_item = item.ReplyAll() if reply_all else item.Reply()
         files = _attach_files(reply_item, attachments)
+        if answers:
+            missing = _write_inline_answers(reply_item, answers)
+            if missing:
+                return _inline_error(missing)
         _write_draft_text(reply_item, body)
         return _save_draft(
             reply_item, "reply_all" if reply_all else "reply",
             in_reply_to=str(item.Subject or ""), to=str(_safe_get(lambda: reply_item.To) or ""),
             cc=str(_safe_get(lambda: reply_item.CC) or ""), files_attached=files,
+            inline_answers=len(answers),
         )
 
     try:
-        return await bridge.call(_reply, entry_id, body, reply_all, account, attachments)
+        return await bridge.call(_reply, entry_id, body, reply_all, account, attachments, inline_replies)
     except Exception as e:
         return f"Error writing reply draft: {format_com_error(e)}"
 
@@ -1710,11 +1827,12 @@ async def search_emails(
     include_body: bool = False,
     match: str = "any",
     account: str = "",
+    flagged_only: bool = False,
 ) -> str:
     """Find emails in the user's main mailbox (Outlook) by a word or name in the
-    subject, sender or recipients, by sender alone, and/or by date. Fast:
-    Outlook does the filtering, well under a second even in a 10,000-message
-    folder.
+    subject, sender or recipients, by sender alone, by date, and/or by
+    follow-up flag. Fast: Outlook does the filtering, well under a second even
+    in a 10,000-message folder.
 
     Start here for "find the email from X", "the thread about Y" or "my history
     with company Z". One call covers it: query= with folder="all" matches the
@@ -1759,6 +1877,9 @@ async def search_emails(
         account: Optional. Account display name (or substring), or "all" for
             every account (shared mailboxes not cached locally are skipped and
             listed under accounts_skipped). Default: the default account.
+        flagged_only: If true, only emails flagged for follow-up in Outlook and
+            not yet marked complete. May stand alone (no query or sender) for
+            "my flagged emails". Default false.
 
     Returns:
         JSON array of matching email summaries. If the time limit cut the search
@@ -1767,11 +1888,11 @@ async def search_emails(
         "accounts_skipped": [...], "elapsed_s": ...} instead.
     """
     def _search(outlook, namespace, query, folder, count, start_date, end_date,
-                sender, include_subfolders, include_body, match, account):
+                sender, include_subfolders, include_body, match, account, flagged_only):
         t0 = time.perf_counter()
         count = min(max(1, count), 200)
-        if not query and not sender:
-            return json.dumps({"error": "Provide a query, a sender, or both"})
+        if not query and not sender and not flagged_only:
+            return json.dumps({"error": "Provide a query, a sender, flagged_only, or a combination"})
         mode = (match or "any").strip().lower()
         if mode not in ("any", "subject"):
             return json.dumps({"error": f"match must be \"any\" or \"subject\", got {match!r}"})
@@ -1792,6 +1913,8 @@ async def search_emails(
             dasl_parts.append(dasl.received_until(_parse_date(end_date)))
         elif start_date:
             dasl_parts.append(dasl.received_until(datetime.now()))
+        if flagged_only:
+            dasl_parts.append(dasl.flagged_filter())
 
         filter_str = dasl.sql(*dasl_parts)
         results, partial = _collect_across_stores(namespace, stores, folder, include_subfolders,
@@ -1802,7 +1925,7 @@ async def search_emails(
 
     try:
         return await bridge.call(_search, query, folder, count, start_date, end_date,
-                                 sender, include_subfolders, include_body, match, account)
+                                 sender, include_subfolders, include_body, match, account, flagged_only)
     except Exception as e:
         return f"Error searching emails: {format_com_error(e)}"
 
@@ -3692,6 +3815,7 @@ async def update_draft(
     bcc: str = "",
     account: str = "",
     replace_body: bool = False,
+    inline_replies: str = "",
 ) -> str:
     """Change an existing draft instead of creating a new one. It is NOT sent.
 
@@ -3719,12 +3843,22 @@ async def update_draft(
             or edited there in a way that lost the marker), the body cannot be
             replaced safely and the tool says so. Pass true to overwrite the
             whole body anyway (signature and quoted text are lost).
+        inline_replies: Optional. The complete new set of inline answers, in the
+            form draft_reply takes; the ones written earlier are removed first.
+            Empty = unchanged.
 
     Returns:
         JSON with status "draft_saved", sent=false, entry_id, folder and the
         list of fields changed.
     """
-    def _update(outlook, namespace, entry_id, body, html_body, subject, to, cc, bcc, account, replace_body):
+    def _update(outlook, namespace, entry_id, body, html_body, subject, to, cc, bcc, account, replace_body,
+                inline_replies):
+        try:
+            answers = _parse_inline_replies(inline_replies)
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+        if answers and plain_text_mode():
+            return json.dumps({"error": "inline_replies needs HTML drafts; the plain_text setting is on."})
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
@@ -3735,6 +3869,11 @@ async def update_draft(
         if bool(_safe_get(lambda: item.Sent, False)):
             return json.dumps({"error": "That message has already been sent; only drafts can be updated."})
         changed = []
+        if answers:
+            missing = _write_inline_answers(item, answers)
+            if missing:
+                return _inline_error(missing)
+            changed.append("inline answers")
         if subject:
             item.Subject = subject
             changed.append("subject")
@@ -3775,7 +3914,8 @@ async def update_draft(
                            to=str(_safe_get(lambda: item.To) or ""), cc=str(_safe_get(lambda: item.CC) or ""))
 
     try:
-        return await bridge.call(_update, entry_id, body, html_body, subject, to, cc, bcc, account, replace_body)
+        return await bridge.call(_update, entry_id, body, html_body, subject, to, cc, bcc, account, replace_body,
+                                 inline_replies)
     except Exception as e:
         return f"Error updating draft: {format_com_error(e)}"
 

@@ -1,4 +1,4 @@
-"""Unit tests for utils.html — outgoing font styling. No Outlook needed."""
+"""Unit tests for utils.html — outgoing font styling and inline answers. No Outlook needed."""
 import os
 import unittest
 from unittest import mock
@@ -20,6 +20,7 @@ class StyleTests(unittest.TestCase):
             for key in ("OUTLOOK_MCP_FONT_FAMILY", "OUTLOOK_MCP_FONT_SIZE_PT", "OUTLOOK_MCP_FONT_COLOR"):
                 os.environ.pop(key, None)
             self.assertEqual(h.font_style(), "font-family:Aptos,Calibri,sans-serif;font-size:12pt;color:#000000")
+            self.assertEqual(h.font_style("#C00000"), "font-family:Aptos,Calibri,sans-serif;font-size:12pt;color:#C00000")
 
     def test_env_override(self):
         with mock.patch.dict(os.environ, {"OUTLOOK_MCP_FONT_FAMILY": "Calibri", "OUTLOOK_MCP_FONT_SIZE_PT": "11",
@@ -44,10 +45,6 @@ class StyleTests(unittest.TestCase):
     def test_style_html_wraps(self):
         self.assertTrue(h.style_html("<b>hi</b>").startswith('<div style="font-family:Aptos'))
         self.assertIn("<b>hi</b></div>", h.style_html("<b>hi</b>"))
-
-
-if __name__ == "__main__":
-    unittest.main()
 
     def test_text_to_html_lists_quotes_and_bold(self):
         out = h.text_to_html(
@@ -90,3 +87,85 @@ if __name__ == "__main__":
     def test_replace_note_without_marker_returns_none(self):
         self.assertIsNone(h.replace_note('<body><p>hand written</p></body>', '<p>y</p>'))
 
+
+# A reply as Outlook's Word renderer writes the quoted message: MsoNormal paragraphs,
+# <o:p> markers, entities, a list and a plain-text block with <br> line breaks.
+QUOTED = (
+    '<html><head><style>p.MsoNormal{margin:0}</style></head><body lang=EN-US>'
+    '<div id="outlook-mcp-note"><p>See below.</p></div>'
+    '<div><p class=MsoNormal>Chris, Jake &#8211; attaching the draft.<o:p></o:p></p>'
+    '<ol><li class=MsoNormal><u>Term</u>: One year, consistent with LOI. <i>Confirm ok.</i></li>'
+    '<li class=MsoNormal>Title: General Manager. Confirm ok.</li></ol>'
+    '<p class=MsoNormal>Mike&#8217;s base is <span lang=EN-US>below</span>&nbsp;the threshold.<o:p></o:p></p>'
+    '<p class=MsoPlainText>Line one<br>Line two<br>Line three</p>'
+    '<p class=MsoNormal>Confirm ok.<o:p></o:p></p>'
+    '</div></body></html>'
+)
+
+
+class InlineAnswerTests(unittest.TestCase):
+    def setUp(self):
+        self._env = mock.patch.dict(os.environ, {"OUTLOOK_MCP_SETTINGS_FILE": os.devnull}, clear=False)
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+
+    def test_anchor_matches_across_tags_entities_and_curly_quotes(self):
+        pos = h.find_anchor(QUOTED, "Mike's base is below the threshold")
+        self.assertIsNotNone(pos)
+        self.assertEqual(QUOTED[pos - len("threshold"):pos], "threshold")
+        self.assertIsNotNone(h.find_anchor(QUOTED, "chris, jake - attaching"))
+        self.assertIsNone(h.find_anchor(QUOTED, "not in the message"))
+        self.assertIsNone(h.find_anchor(QUOTED, "margin:0"))  # <style> is not visible text
+
+    def test_answer_goes_after_the_paragraph(self):
+        out, missing = h.insert_inline(QUOTED, [("attaching the draft", "Thanks Mitch.")], "#C00000")
+        self.assertEqual(missing, [])
+        after = out.index("attaching the draft.<o:p></o:p></p>") + len("attaching the draft.<o:p></o:p></p>")
+        self.assertTrue(out[after:].startswith(f'<p class="{h.INLINE_CLASS}" style="margin:0;line-height:100%;'))
+        self.assertIn("color:#C00000", out[after:after + 200])
+        self.assertIn("Thanks Mitch.</span></p>", out)
+        self.assertLess(out.index("Thanks Mitch."), out.index("<ol>"))
+
+    def test_answer_inside_a_list_item(self):
+        out, missing = h.insert_inline(QUOTED, [("Term: One year", "Confirmed, one year.")])
+        self.assertEqual(missing, [])
+        li_end = out.index("</li>")
+        self.assertTrue(out[:li_end].endswith("Confirmed, one year.</span></p>"))
+        self.assertIn("Confirm ok.</i>", out[:li_end])
+
+    def test_answer_after_a_line_break_is_a_line(self):
+        out, missing = h.insert_inline(QUOTED, [("Line one", "Yes.")])
+        self.assertEqual(missing, [])
+        self.assertIn(f'Line one<br><span class="{h.INLINE_CLASS}" style="', out)
+        self.assertIn(">Yes.</span><br>Line two", out)
+
+    def test_answers_resolve_in_document_order(self):
+        out, missing = h.insert_inline(QUOTED, [("Confirm ok", "First."), ("Confirm ok", "Second."), ("Confirm ok", "Third.")])
+        self.assertEqual(missing, [])
+        self.assertLess(out.index("First."), out.index("Title: General Manager"))
+        self.assertLess(out.index("Title: General Manager"), out.index("Second."))
+        self.assertLess(out.index("Line three"), out.index("Third."))
+
+    def test_missing_anchor_changes_nothing(self):
+        out, missing = h.insert_inline(QUOTED, [("Term: One year", "ok"), ("no such phrase", "x")])
+        self.assertEqual(missing, ["no such phrase"])
+        self.assertEqual(out, QUOTED)
+
+    def test_multi_paragraph_answer_and_strip(self):
+        out, _ = h.insert_inline(QUOTED, [("Term: One year", "Confirmed.\n\n1. one\n2. two"), ("Line one", "Yes.")])
+        self.assertIn(f'<ol class="{h.INLINE_CLASS}"', out)
+        self.assertEqual(h.strip_inline(out), QUOTED)
+        # Word may drop the quotes around the class when the draft is reopened.
+        rewritten = out.replace(f'class="{h.INLINE_CLASS}"', f'class={h.INLINE_CLASS}')
+        self.assertEqual(h.strip_inline(rewritten), QUOTED)
+
+    def test_no_block_end_appends_before_body_close(self):
+        out, missing = h.insert_inline("<body><span>only text</span></body>", [("only text", "ans")])
+        self.assertEqual(missing, [])
+        self.assertTrue(out.endswith("ans</span></p></body>"))
+
+
+if __name__ == "__main__":
+    unittest.main()

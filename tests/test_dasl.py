@@ -16,6 +16,18 @@ class EscapeTests(unittest.TestCase):
         self.assertEqual(dasl.jet_date(datetime(2026, 3, 9, 7, 5)), "03/09/2026 07:05")
 
 
+class FlagFilterTests(unittest.TestCase):
+    def test_flagged_is_the_open_task_or_the_old_flag(self):
+        f = dasl.flagged_filter()
+        self.assertEqual(f, f'("{dasl.TASK_COMPLETE}" = 0 OR "{dasl.FLAG_STATUS}" = 2)')
+        self.assertIn("811C000B", dasl.TASK_COMPLETE)  # PidLidTaskComplete, PSETID_Task
+
+    def test_unread_and_flagged_chain_in_one_sql(self):
+        s = dasl.sql(dasl.flagged_filter(), dasl.unread_filter())
+        self.assertTrue(s.startswith("@SQL=("))
+        self.assertIn(f' AND "{dasl.READ}" = 0', s)
+
+
 class FilterTests(unittest.TestCase):
     def test_sender_filter_covers_name_directory_and_smtp(self):
         f = dasl.sender_filter("pennspring")

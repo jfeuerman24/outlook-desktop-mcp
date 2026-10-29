@@ -3,6 +3,31 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## 0.10.0 - 2026-10-29
+
+### Added
+- **Inline answers.** `draft_reply` takes `inline_replies`, a list of `{"after": <phrase from
+  the original>, "text": <answer>}`: each answer is written inside the quoted message, right
+  under the paragraph or list item that contains the phrase, in the new `inline_color` setting
+  (dark red by default), the way people answer a numbered list point by point in Outlook.
+  Anchors are matched on the text a reader sees, so Word's tags, entities and curly quotes in
+  between do not matter, and a phrase that repeats ("Confirm ok.") resolves in document order.
+  An anchor that is not found saves nothing and is named in the result. `update_draft` takes
+  the same parameter and rewrites the set. Until now the only way to answer inline was an HTML
+  file pasted by hand.
+- **Flagged mail.** Every email summary carries `flagged` (a follow-up flag not yet complete)
+  and, when flagged, `flag_due`. `list_emails` and `search_emails` take `flagged_only`; it may
+  stand alone in `search_emails` for "my flagged emails". Outlook stores a modern flag as a task
+  on the message, which `[FlagStatus]` filters do not see, so the filter uses the task's
+  complete property.
+
+### Fixed
+- Drafts the server saved showed in Outlook's reading pane without the editor (a bare header
+  with "None" in it, no From or Send) until the user opened and closed them once. The hidden
+  inspector `GetInspector` creates to fill the reply was never closed, and the draft was saved
+  unread where Outlook's own are read. `_save_draft` now marks the draft read and closes the
+  inspector after saving.
+
 ## 0.9.2 - 2026-10-27
 
 ### Changed

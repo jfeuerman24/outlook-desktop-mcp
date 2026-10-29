@@ -150,18 +150,18 @@ You have three options:
 
 | Tool | Description |
 |------|-------------|
-| `list_emails` | List recent emails from any folder (or `folder="all"` for the Inbox tree, Sent Items and Archive), with optional unread, date, sender and subfolder filters; `account="all"` for every mailbox |
+| `list_emails` | List recent emails from any folder (or `folder="all"` for the Inbox tree, Sent Items and Archive), with optional unread, flagged, date, sender and subfolder filters; `account="all"` for every mailbox. Every summary says whether the message is `flagged` for follow-up and its `flag_due` date |
 | `read_email` | Read full email content by entry ID or subject search (quoted history trimmed unless `include_history`); `thread_depth` says how deep in a thread it sits |
-| `search_emails` | Find mail by a word or name in the subject, sender or recipients (`match="any"`, the default) or the subject only, by sender alone, and by date, in about a second even in a big folder; `folder="all"` covers the Inbox tree, Sent Items and Archive in one call; `include_body` also scans message text (slow); `account="all"` for every mailbox |
+| `search_emails` | Find mail by a word or name in the subject, sender or recipients (`match="any"`, the default) or the subject only, by sender alone, and by date, in about a second even in a big folder; `folder="all"` covers the Inbox tree, Sent Items and Archive in one call; `include_body` also scans message text (slow); `flagged_only` for flagged mail; `account="all"` for every mailbox |
 | `get_conversation` | Every message of a thread, oldest first, each once, across folders and dates; `max_body_chars` for a cheap look at long threads |
 | `reply_context` | What a reply preview needs: the To/CC Outlook's own Reply or Reply All would use, who is on the thread, a digest of the earlier messages, the message in full. Creates nothing |
 | `open_in_outlook` | Open an email, draft, meeting, appointment or task in its own Outlook window when you ask. Changes nothing |
 | `contact_history` | One known person across every account: last received, last sent, mail where they were copied, recent messages every way, last and next meeting. The broadest search; use after a targeted one. A company name given to it comes back as `subject_matches` |
 | `list_folders` | Browse the folder hierarchy with item counts |
 | `draft_email` | Write a new email to Drafts with To/CC/BCC and optional file attachments. **Not sent.** |
-| `draft_reply` | Write a reply or reply-all above the quoted thread, save to Drafts, optional attachments. **Not sent.** |
+| `draft_reply` | Write a reply or reply-all above the quoted thread, or answer a list point by point with `inline_replies` (each answer in red under the paragraph it answers, inside the quoted message), save to Drafts, optional attachments. **Not sent.** |
 | `draft_forward` | Forward an email with Outlook's own Forward() (FW: subject, header block, quoted message, attachments), your note above it, saved to Drafts. Can forward the newest message of the thread and pull in attachments from earlier messages. **Not sent.** |
-| `update_draft` | Change an existing draft's note, subject or recipients instead of making a new one. **Not sent.** |
+| `update_draft` | Change an existing draft's note, inline answers, subject or recipients instead of making a new one. **Not sent.** |
 | `mark_as_read` | Mark a specific email as read |
 | `mark_as_unread` | Mark a specific email as unread |
 | `move_email` | Move an email to Archive, Trash, or any folder |
@@ -226,7 +226,7 @@ You have three options:
 The five tools that would normally send instead save and hand over to you:
 
 - `draft_email` writes a new message to the Drafts folder of the chosen account.
-- `draft_reply` builds Outlook's own reply or reply-all (recipients, quoted thread, signature) and puts the text above it.
+- `draft_reply` builds Outlook's own reply or reply-all (recipients, quoted thread, signature) and puts the text above it. To answer a list of points one by one, `inline_replies` writes each answer inside the quoted message, under the paragraph it answers, in dark red (the `inline_color` setting), with a short note such as "See below." above the thread.
 - `draft_forward` builds Outlook's own forward (FW: subject, header block, quoted message, attachments) and puts your note above it.
 - `draft_forward_event` adds the person to a meeting you organise (you press Send Update), or forwards any other event as an email with the .ics attached, to Drafts. Outlook's own Forward button on a received meeting, which sends a real invitation, exists only in Outlook's window.
 - `draft_meeting` puts the meeting on your calendar with the attendees filled in and the invitations unsent.
@@ -310,6 +310,7 @@ Claude's config, which then overrides the file.
 | `hide_accounts` | `OUTLOOK_MCP_HIDE_ACCOUNTS` | none | Mailboxes (name substrings, `;`-separated) left out of `list_accounts` and `account="all"`; still reachable by name |
 | `open_in_outlook` | `OUTLOOK_MCP_OPEN_IN_OUTLOOK` | `meetings` | Which saved drafts open in an Outlook window: `meetings` (unsent invitations only), `all`, or `none`. `open_drafts` (true/false) is the older name and still works until this one is set |
 | `font_family`, `font_size_pt`, `font_color` | `OUTLOOK_MCP_FONT_*` | Aptos, 12, black | Font for the text the server writes into drafts |
+| `inline_color` | `OUTLOOK_MCP_INLINE_COLOR` | `#C00000` (dark red) | Colour of the answers `draft_reply` writes inside the quoted message (`inline_replies`) |
 | `plain_text` | `OUTLOOK_MCP_PLAIN_TEXT` | off | Write drafts as plain text instead of styled HTML |
 | `include_shared_in_all` | `OUTLOOK_MCP_INCLUDE_SHARED_IN_ALL` | off | Include shared, non-cached mailboxes in `account="all"` searches (slow) |
 | `call_timeout_s` | `OUTLOOK_MCP_CALL_TIMEOUT_S` | 60 | Seconds a tool call may take; long searches return partial results just before it |
