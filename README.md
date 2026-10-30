@@ -165,7 +165,7 @@ You have three options:
 | `mark_as_read` | Mark a specific email as read |
 | `mark_as_unread` | Mark a specific email as unread |
 | `set_flag` | Flag an email for follow-up (no date, today, tomorrow, this week, next week or a date), mark the flag complete, or clear it |
-| `move_email` | Move an email to Archive, Trash, or any folder |
+| `move_email` | Move an email to Archive, Trash, or any folder; returns its new entry_id |
 
 ### Calendar
 
@@ -200,7 +200,7 @@ You have three options:
 | `list_attachments` | List all attachments on an email or calendar event |
 | `save_attachment` | Save an attachment to a local directory (writes to disk, never to the mailbox) |
 | `read_attachment` | Read the text of a PDF, Word, Excel, PowerPoint, CSV, text or .msg attachment without saving it |
-| `add_attachment` | Attach files from this PC to an existing draft |
+| `add_attachment` | Attach files from this PC to an existing draft (a file open in Excel or Word is attached as a copy) |
 
 ### Categories, Rules, Out of Office
 

@@ -517,10 +517,11 @@ def _parse_inline_replies(raw: str) -> list[tuple[str, str]]:
     return out
 
 
-def _write_inline_answers(item, answers) -> list[str]:
+def _write_inline_answers(item, answers, keep_open: bool = False) -> list[str]:
     """Write point-by-point answers inside the quoted message of a reply or forward, each
     under the paragraph its anchor names and in the inline_color, replacing any written
-    earlier. Returns the anchors that were not found; nothing is written then."""
+    earlier. Returns the anchors that were not found; nothing is written then. ``keep_open``
+    says the item is open in the user's own Outlook window, which must not be closed."""
     try:
         item.GetInspector
     except Exception:
@@ -529,10 +530,11 @@ def _write_inline_answers(item, answers) -> list[str]:
     color = str(settings.get("inline_color") or DEFAULT_INLINE_COLOR)
     new_html, missing = insert_inline(current, answers, color)
     if missing:
-        try:
-            item.Close(1)  # olDiscard: drop the inspector, and a reply that was never saved
-        except Exception:
-            pass
+        if not keep_open:
+            try:
+                item.Close(1)  # olDiscard: drop the inspector, and a reply that was never saved
+            except Exception:
+                pass
         return missing
     item.HTMLBody = new_html
     return []
@@ -546,9 +548,10 @@ def _inline_error(missing: list[str]) -> str:
     }, indent=2)
 
 
-def _attach_files(item, paths: str) -> list[dict]:
-    """Attach each file in the semicolon-separated ``paths`` to ``item``; returns what was attached."""
-    added = []
+def _resolve_attachment_paths(paths: str) -> list[str]:
+    """The files named in the semicolon-separated ``paths``, as absolute paths. A file that does
+    not exist raises ValueError here, before any draft is created."""
+    out: list[str] = []
     for raw in (paths or "").split(";"):
         p = raw.strip().strip('"').strip("'")
         if not p:
@@ -556,19 +559,124 @@ def _attach_files(item, paths: str) -> list[dict]:
         full = os.path.abspath(os.path.expanduser(os.path.expandvars(p)))
         if not os.path.isfile(full):
             raise ValueError(f"Attachment not found: {full}")
-        item.Attachments.Add(full)
-        added.append({"filename": os.path.basename(full), "size": os.path.getsize(full), "path": full})
-    return added
+        out.append(full)
+    return out
 
 
-def _save_draft(item, kind: str, where: str = "in the Drafts folder", **extra) -> str:
+def _office_owner_file(full: str) -> bool:
+    """True when Excel, Word or PowerPoint has ``full`` open: each leaves a hidden ``~$`` owner
+    file beside the document (Word drops the first one or two characters of the name)."""
+    folder, name = os.path.split(full)
+    for stem in (name, name[1:], name[2:]):
+        if stem and os.path.exists(os.path.join(folder, "~$" + stem)):
+            return True
+    return False
+
+
+_HELD_BY_OFFICE = "it is open in Excel, Word or PowerPoint"
+
+
+def _attach_files(item, full_paths: list[str]) -> tuple[list[dict], list[dict], str | None]:
+    """Attach each file to ``item``. When Outlook cannot read a file where it is (open in Excel
+    or Word, or being synced), an identical copy is attached under the same name from a temp
+    folder, which the caller removes after Save. A file that still fails is reported, not
+    raised, so the draft is saved without it. Returns (attached, failed, tmpdir)."""
+    added: list[dict] = []
+    failed: list[dict] = []
+    tmpdir: str | None = None
+    for n, full in enumerate(full_paths):
+        entry = {"filename": os.path.basename(full), "size": os.path.getsize(full), "path": full}
+        try:
+            item.Attachments.Add(full)
+            added.append(entry)
+            continue
+        except Exception as first:
+            error = format_com_error(first)
+        held = _office_owner_file(full)
+        try:
+            if tmpdir is None:
+                tmpdir = tempfile.mkdtemp(prefix="outlook-mcp-attach-")
+            sub = os.path.join(tmpdir, str(n))
+            os.makedirs(sub, exist_ok=True)
+            copy = os.path.join(sub, os.path.basename(full))
+            shutil.copy2(full, copy)
+            item.Attachments.Add(copy)
+        except Exception as second:
+            logger.warning("Could not attach %s (%s); a copy failed too: %s", full, error, second)
+            failed.append({
+                "path": full,
+                "error": error,
+                "reason": (f"The file could not be read in place or copied; {_HELD_BY_OFFICE}. Close it there, "
+                           "then use add_attachment." if held else
+                           "Outlook could not read the file and a copy could not be attached either."),
+            })
+            continue
+        entry["note"] = ("Outlook could not read the file where it is" + (f" ({_HELD_BY_OFFICE})" if held else "")
+                         + "; an identical copy was attached under the same name.")
+        added.append(entry)
+    return added, failed, tmpdir
+
+
+def _rm_tmpdir(tmpdir: str | None) -> None:
+    if tmpdir:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _attachment_extras(added: list[dict], failed: list[dict]) -> dict:
+    """Result fields describing attachments; ``files_failed`` and a warning only when needed."""
+    extra: dict = {"files_attached": added}
+    if failed:
+        extra["files_failed"] = failed
+        extra["warning"] = (f"{len(failed)} file(s) could not be attached; the draft was saved without them. "
+                            "Fix the cause (see files_failed) and use add_attachment.")
+    return extra
+
+
+def _open_in_outlook(outlook, namespace, entry_id: str) -> str | None:
+    """Where Outlook is showing the item with ``entry_id``: "window" when an Inspector has it
+    open, "reading_pane" when it is selected in the main window, else None.
+
+    GetItemFromID hands back the very object such a window holds, so reads and saves through
+    it work; but moving an item out of an open window leaves the window attached to nothing,
+    and a draft selected in the Drafts list is an "inline response" that Outlook will not move.
+    """
+    def same(other) -> bool:
+        try:
+            return bool(other) and bool(namespace.CompareEntryIDs(str(other), entry_id))
+        except Exception:
+            return False
+
+    try:
+        inspectors = outlook.Inspectors
+        for i in range(int(inspectors.Count)):
+            current = inspectors.Item(i + 1).CurrentItem
+            if current is not None and same(_safe_get(lambda: current.EntryID)):
+                return "window"
+    except Exception as e:
+        logger.debug("Inspector scan failed: %s", e)
+    try:
+        explorer = outlook.ActiveExplorer()
+        if explorer is not None:
+            selection = explorer.Selection
+            for i in range(min(int(selection.Count), 25)):
+                if same(_safe_get(lambda: selection.Item(i + 1).EntryID)):
+                    return "reading_pane"
+    except Exception as e:
+        logger.debug("Explorer selection scan failed: %s", e)
+    return None
+
+
+def _save_draft(item, kind: str, where: str = "in the Drafts folder", open_where: str | None = None,
+                **extra) -> str:
     """Save ``item`` without sending, open it in Outlook if the open_in_outlook setting says
     drafts of this ``kind`` should open (by default only meetings do), describe the result.
     ``where`` says where the item sits when it was not opened.
 
     The draft is saved read, as Outlook's own are, and the hidden inspector that
     ``GetInspector`` created to fill it is closed afterwards; left open, the reading pane
-    shows the draft without its editor until the user opens and closes it once.
+    shows the draft without its editor until the user opens and closes it once. When the
+    draft is already open in Outlook (``open_where`` from ``_open_in_outlook``), nothing is
+    closed: Close would shut the user's own window.
     """
     try:
         item.UnRead = False
@@ -600,7 +708,12 @@ def _save_draft(item, kind: str, where: str = "in the Drafts folder", **extra) -
                  + "The user checks it in Outlook and presses Send."),
         **extra,
     }
-    if not opened:
+    if open_where:
+        result["open_in_outlook"] = open_where
+        result["note"] = ("Nothing has been sent. The draft was already open in Outlook ("
+                          + ("a window" if open_where == "window" else "the reading pane")
+                          + "), where the change now shows. The user checks it there and presses Send.")
+    elif not opened:
         try:
             item.Close(0)  # olSave: releases the inspector; the item object is stale after this
         except Exception as e:
@@ -664,8 +777,12 @@ async def draft_email(
     Returns:
         JSON with status "draft_saved", sent=false, entry_id, folder and whether
         it was opened in Outlook. Tell the user the draft is waiting for them.
+        A file Outlook could not attach is listed in files_failed with the
+        reason; the draft is saved without it, so fix the cause and use
+        add_attachment rather than creating another draft.
     """
     def _draft(outlook, namespace, to, subject, body, cc, bcc, html_body, account, attachments):
+        wanted = _resolve_attachment_paths(attachments)
         store = _require_store(namespace, account)
         mail = store.GetDefaultFolder(OL_FOLDER_DRAFTS).Items.Add(OL_MAIL_ITEM)
         _set_sending_account(mail, outlook, store)
@@ -675,9 +792,12 @@ async def draft_email(
         if bcc:
             mail.BCC = bcc
         mail.Subject = subject
-        files = _attach_files(mail, attachments)
-        _write_draft_text(mail, body, html_body)
-        return _save_draft(mail, "email", to=to, cc=cc, bcc=bcc, files_attached=files)
+        files, failed, tmpdir = _attach_files(mail, wanted)
+        try:
+            _write_draft_text(mail, body, html_body)
+            return _save_draft(mail, "email", to=to, cc=cc, bcc=bcc, **_attachment_extras(files, failed))
+        finally:
+            _rm_tmpdir(tmpdir)
 
     try:
         return await bridge.call(_draft, to, subject, body, cc, bcc, html_body, account, attachments)
@@ -1509,21 +1629,41 @@ async def move_email(
             the target folder in. Default: primary account.
 
     Returns:
-        Confirmation with email subject and destination, or an error.
+        JSON with status "moved", the subject, the folder and the email's NEW
+        entry_id, or an error. Outlook will not move an email it is showing:
+        the error then says to close its window, or for a draft selected in
+        the Drafts list, to click a different message, and try again.
     """
     def _move(outlook, namespace, entry_id, target_folder, account):
         item = namespace.GetItemFromID(entry_id)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
             return err
-        subject = item.Subject
+        subject = str(_safe_get(lambda: item.Subject) or "")
+        where = _open_in_outlook(outlook, namespace, entry_id)
+        if where == "window":
+            return ("Error: this email is open in an Outlook window, so it was not moved; moving it would leave "
+                    "that window attached to nothing. Ask the user to close the window, then try again.")
 
         store = _require_store(namespace, account)
         dest = _resolve_folder(namespace, target_folder, store)
         if not dest:
             return f"Error: Target folder '{target_folder}' not found. Use list_folders to see available folders."
 
-        item.Move(dest)
-        return f"Moved '{subject}' to {target_folder}"
+        try:
+            moved = item.Move(dest)
+        except Exception as e:
+            if where == "reading_pane" and not bool(_safe_get(lambda: item.Sent, True)):
+                return ("Error: this draft is selected in Outlook, so the reading pane is showing its editor and "
+                        f"Outlook will not move it ({format_com_error(e)}). Ask the user to click a different "
+                        "message, then try again.")
+            raise
+        return json.dumps({
+            "status": "moved",
+            "subject": subject,
+            "folder": target_folder,
+            "entry_id": str(_safe_get(lambda: moved.EntryID) or "") if moved is not None else "",
+            "note": "The email has a new entry_id after the move; the old one is no longer valid.",
+        }, indent=2, default=str)
 
     try:
         return await bridge.call(_move, entry_id, target_folder, account)
@@ -1607,19 +1747,23 @@ async def draft_reply(
             item = namespace.GetItemFromID(entry_id)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
             return err
+        wanted = _resolve_attachment_paths(attachments)
         reply_item = item.ReplyAll() if reply_all else item.Reply()
-        files = _attach_files(reply_item, attachments)
-        if answers:
-            missing = _write_inline_answers(reply_item, answers)
-            if missing:
-                return _inline_error(missing)
-        _write_draft_text(reply_item, body)
-        return _save_draft(
-            reply_item, "reply_all" if reply_all else "reply",
-            in_reply_to=str(item.Subject or ""), to=str(_safe_get(lambda: reply_item.To) or ""),
-            cc=str(_safe_get(lambda: reply_item.CC) or ""), files_attached=files,
-            inline_answers=len(answers),
-        )
+        files, failed, tmpdir = _attach_files(reply_item, wanted)
+        try:
+            if answers:
+                missing = _write_inline_answers(reply_item, answers)
+                if missing:
+                    return _inline_error(missing)
+            _write_draft_text(reply_item, body)
+            return _save_draft(
+                reply_item, "reply_all" if reply_all else "reply",
+                in_reply_to=str(item.Subject or ""), to=str(_safe_get(lambda: reply_item.To) or ""),
+                cc=str(_safe_get(lambda: reply_item.CC) or ""), inline_answers=len(answers),
+                **_attachment_extras(files, failed),
+            )
+        finally:
+            _rm_tmpdir(tmpdir)
 
     try:
         return await bridge.call(_reply, entry_id, body, reply_all, account, attachments, inline_replies)
@@ -1754,6 +1898,7 @@ async def draft_forward(
             return json.dumps({"error": str(e).replace("inline_replies", "inline_notes")})
         if notes and plain_text_mode():
             return json.dumps({"error": "inline_notes needs HTML drafts; the plain_text setting is on."})
+        wanted = _resolve_attachment_paths(attachments)
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
@@ -1817,8 +1962,9 @@ async def draft_forward(
                         "from_entry_id": str(_safe_get(lambda: node.EntryID) or ""),
                     })
 
+        attach_tmp = None
         try:
-            files = _attach_files(fwd, attachments)
+            files, failed, attach_tmp = _attach_files(fwd, wanted)
             if notes:
                 missing = _write_inline_answers(fwd, notes)
                 if missing:
@@ -1832,11 +1978,12 @@ async def draft_forward(
                 forwarded_subject=str(_safe_get(lambda: source.Subject) or ""),
                 forwarded_is_latest=(source_id == newest_id),
                 to=str(_safe_get(lambda: fwd.To) or ""), cc=str(_safe_get(lambda: fwd.CC) or ""),
-                attachments_added=attachments_added, files_attached=files, inline_notes=len(notes),
+                attachments_added=attachments_added, inline_notes=len(notes),
+                **_attachment_extras(files, failed),
             )
         finally:
-            if tmpdir:
-                shutil.rmtree(tmpdir, ignore_errors=True)
+            _rm_tmpdir(tmpdir)
+            _rm_tmpdir(attach_tmp)
 
     try:
         return await bridge.call(
@@ -4144,9 +4291,10 @@ async def update_draft(
             return err
         if bool(_safe_get(lambda: item.Sent, False)):
             return json.dumps({"error": "That message has already been sent; only drafts can be updated."})
+        where = _open_in_outlook(outlook, namespace, entry_id)
         changed = []
         if answers:
-            missing = _write_inline_answers(item, answers)
+            missing = _write_inline_answers(item, answers, keep_open=bool(where))
             if missing:
                 return _inline_error(missing)
             changed.append("inline answers")
@@ -4185,7 +4333,7 @@ async def update_draft(
                 item.HTMLBody = new_html
         if not changed:
             return json.dumps({"error": "Nothing to change: give a body, subject or recipients."})
-        return _save_draft(item, "update", changed=changed,
+        return _save_draft(item, "update", open_where=where, changed=changed,
                            subject=str(_safe_get(lambda: item.Subject) or ""),
                            to=str(_safe_get(lambda: item.To) or ""), cc=str(_safe_get(lambda: item.CC) or ""))
 
@@ -4214,8 +4362,15 @@ async def add_attachment(entry_id: str, paths: str, account: str = "") -> str:
 
     Returns:
         JSON with the files attached (filename, size) and the draft's entry_id.
+        A file Outlook cannot read where it is (open in Excel or Word, say) is
+        attached as an identical copy under the same name, with a note. One
+        that still fails is listed in files_failed with Outlook's reason and
+        the others are attached anyway (status "partial").
     """
     def _add(outlook, namespace, entry_id, paths, account):
+        wanted = _resolve_attachment_paths(paths)
+        if not wanted:
+            return json.dumps({"error": "No file given: paths must name at least one file on this PC."})
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
@@ -4223,11 +4378,21 @@ async def add_attachment(entry_id: str, paths: str, account: str = "") -> str:
             item = namespace.GetItemFromID(entry_id)
         if bool(_safe_get(lambda: item.Sent, False)):
             return json.dumps({"error": "That message has already been sent; files can only be added to drafts."})
-        added = _attach_files(item, paths)
-        item.Save()
-        return json.dumps({"status": "attached", "entry_id": str(_safe_get(lambda: item.EntryID) or entry_id),
-                           "files_attached": added, "attachment_count": int(_safe_get(lambda: item.Attachments.Count, 0) or 0)},
-                          indent=2, default=str)
+        added, failed, tmpdir = _attach_files(item, wanted)
+        try:
+            if added:
+                item.Save()
+        finally:
+            _rm_tmpdir(tmpdir)
+        result = {
+            "status": "attached" if not failed else ("partial" if added else "nothing_attached"),
+            "entry_id": str(_safe_get(lambda: item.EntryID) or entry_id),
+            "files_attached": added,
+            "attachment_count": int(_safe_get(lambda: item.Attachments.Count, 0) or 0),
+        }
+        if failed:
+            result["files_failed"] = failed
+        return json.dumps(result, indent=2, default=str)
 
     try:
         return await bridge.call(_add, entry_id, paths, account)

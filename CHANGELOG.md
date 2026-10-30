@@ -3,6 +3,39 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## 0.11.2 - 2026-10-30
+
+### Changed
+- **Errors say what Outlook said.** pywin32 reports every exception Outlook raises as
+  `COM Error (0x80020009): Exception occurred.`, and that was all the tools passed on;
+  Outlook's own sentence and error code were dropped. They now lead the message, for example
+  `This method can't be used with an inline response mail item. (Outlook error 0x80004005)`.
+  A failure with no detail says so and names the common causes. A morning of attachment and
+  move failures that all read the same was diagnosed by guesswork; this settles such cases
+  in one call.
+- **A file Outlook cannot read in place is attached as a copy.** `add_attachment` and the
+  `attachments` argument of `draft_email`, `draft_reply` and `draft_forward` retry with an
+  identical copy under the same name when `Attachments.Add` fails on the original (a workbook
+  open in Excel in a OneDrive folder was the case seen), and the result says so. The copy
+  lives in a temp folder only until the draft is saved.
+- **Draft tools no longer fail whole over one attachment.** The draft is saved and the file
+  is listed in `files_failed` with Outlook's reason, so Claude fixes the cause and uses
+  `add_attachment` instead of retrying and leaving duplicates. A path that does not exist is
+  still refused up front, before any draft is created. `add_attachment` attaches what it can
+  and reports the rest (`status: partial`).
+- **`move_email` returns the new entry_id** as JSON (`status: moved`), since the old one
+  stops working the moment the email moves. It refuses, in plain words, to move an email that
+  is open in an Outlook window: the move would leave that window attached to nothing. When
+  Outlook refuses to move a draft that is selected in the Drafts list (the reading pane is
+  showing its editor; Outlook calls it an "inline response"), the error says to click a
+  different message and try again. A selected email in the Inbox moves as before.
+
+### Fixed
+- `update_draft` on a draft the user had open in an Outlook window closed that window when it
+  finished, and with `inline_replies` whose anchors were not found it discarded the window's
+  unsaved edits. The draft's open window or reading pane is now detected and left alone, and
+  the result carries `open_in_outlook`.
+
 ## 0.11.1 - 2026-10-29
 
 ### Changed
