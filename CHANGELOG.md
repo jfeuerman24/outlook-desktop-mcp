@@ -3,6 +3,18 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## 0.11.3 - 2026-11-11
+
+### Fixed
+- **A numbered list with blank lines between its items came out as "1. 1. 1."** The
+  plain-text `body` of every draft tool was turned into HTML one paragraph at a time, so
+  each item separated by a blank line became a list of its own, and Outlook numbers every
+  list from 1; a reply went out that way. Consecutive items are now one list whether or not
+  blank lines separate them (the blank line becomes space under the item), bullets
+  likewise. A list also starts at the number typed (`3.` then `4.` stays 3 and 4), so a
+  list that resumes after a paragraph keeps its numbering; a number that goes back to `1.`
+  starts a new list. Inline answers use the same code and get the same fix.
+
 ## 0.11.2 - 2026-10-30
 
 ### Changed

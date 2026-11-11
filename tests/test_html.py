@@ -63,6 +63,37 @@ class StyleTests(unittest.TestCase):
         self.assertIn("Done &amp; dusted.", out)
         self.assertNotIn("**", out)
 
+    def test_items_separated_by_blank_lines_are_one_list(self):
+        out = h.text_to_html("Changes:\n\n1. A\n\n2. B\n\n3. C\n\nJake")
+        self.assertEqual(out.count("<ol"), 1)
+        self.assertEqual(out.count("<li"), 3)
+        self.assertEqual(out.count("margin:0 0 12pt 0"), 2)  # space under A and B, not under C
+        self.assertEqual(out.count("&nbsp;"), 2)  # blank lines only around the list
+        self.assertNotIn("start=", out)
+
+    def test_numbered_list_starts_at_the_number_typed(self):
+        out = h.text_to_html("3. A\n\n4) B")
+        self.assertEqual(out.count("<ol"), 1)
+        self.assertIn('start="3"', out)
+        self.assertTrue(out.startswith("<ol style="))  # inline answers tag the list by this prefix
+
+    def test_a_restart_or_a_paragraph_between_ends_the_list(self):
+        out = h.text_to_html("1. A\n\n2. B\n\nOutro\n\n1. X\n\n1. Y")
+        self.assertEqual(out.count("<ol"), 3)
+        self.assertNotIn("start=", out)
+        resumed = h.text_to_html("1. A\n\nAside\n\n2. B")
+        self.assertEqual(resumed.count("<ol"), 2)
+        self.assertIn('start="2"', resumed)
+
+    def test_bullets_across_blank_lines_and_mixed_kinds(self):
+        out = h.text_to_html("- A\n\n- B\n\n1. X")
+        self.assertEqual(out.count("<ul"), 1)
+        self.assertEqual(out.count("<ol"), 1)
+        self.assertEqual(out.count("<li"), 3)
+
+    def test_number_mid_sentence_is_not_a_list(self):
+        self.assertNotIn("<ol", h.text_to_html("See section 1. It says so."))
+
     def test_note_marker_round_trip(self):
         doc = ('<html><body>' + h.wrap_note('<p>old note</p><div><p>nested</p></div>')
                + '<div class="sig">-- Jake</div><div>quoted history</div></body></html>')

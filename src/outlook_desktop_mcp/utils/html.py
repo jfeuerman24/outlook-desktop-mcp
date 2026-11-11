@@ -72,38 +72,70 @@ def text_to_html(text: str, color: str = "") -> str:
     person typing in Outlook gets. Within a paragraph, single newlines become ``<br>``.
     A paragraph whose lines start with ``1.`` / ``2)`` becomes a numbered list, one with
     ``-``, ``*`` or ``\u2022`` a bulleted list; a line without a marker continues the
-    previous item on its own line. A paragraph whose lines start with ``>`` is indented
+    previous item on its own line. Items separated by blank lines stay one list (the blank
+    line becomes space under the item), and a numbered list starts at the number typed.
+    A paragraph whose lines start with ``>`` is indented
     (useful for text the reader should copy). ``**bold**`` works anywhere. Everything
     else is escaped literally. ``color`` overrides the font_color setting.
     """
     style = font_style(color)
+    size = str(settings.get("font_size_pt") or DEFAULT_SIZE_PT).strip() or DEFAULT_SIZE_PT
     normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     paragraphs = re.split(r"\n\s*\n", normalized) if normalized else [""]
     line = f"margin:0;line-height:100%;{style}"
+    spaced = f"margin:0 0 {size}pt 0;line-height:100%;{style}"  # an item with a blank line after it
     span = f'<span style="{style}">'
-    blocks = []
+    blocks: list[str] = []
+    # The list being built: items separated by blank lines are still ONE list. A list per
+    # paragraph makes every item its own list, and Outlook numbers each of those "1.".
+    run: dict | None = None
+
+    def close_run() -> None:
+        nonlocal run
+        if run is None:
+            return
+        tag = "ol" if run["ordered"] else "ul"
+        li = "".join(f'<li style="{spaced if gap else line}">{span}{_item_html(item)}</span></li>'
+                     for item, gap in run["items"])
+        start = f' start="{run["first"]}"' if run["ordered"] and run["first"] != 1 else ""
+        blocks.append(f'<{tag} style="margin:0;padding-left:24pt;{line}"{start}>{li}</{tag}>')
+        run = None
+
     for paragraph in paragraphs:
         lines = paragraph.strip().split("\n")
         first = lines[0]
         if _OL_ITEM.match(first) or _UL_ITEM.match(first):
             ordered = bool(_OL_ITEM.match(first))
             pattern = _OL_ITEM if ordered else _UL_ITEM
-            items: list[list[str]] = []
+            items: list[list] = []
+            numbers: list[int] = []
             for ln in lines:
                 m = pattern.match(ln)
                 if m:
-                    items.append([m.group(2) if ordered else m.group(1)])
+                    items.append([[m.group(2) if ordered else m.group(1)], False])
+                    if ordered:
+                        numbers.append(int(m.group(1)))
                 elif items:
-                    items[-1].append(ln)
-            tag = "ol" if ordered else "ul"
-            li = "".join(f'<li style="{line}">{span}{_item_html(item)}</span></li>' for item in items)
-            blocks.append(f'<{tag} style="margin:0;padding-left:24pt;{line}">{li}</{tag}>')
-        elif all(_QUOTE.match(ln) for ln in lines):
+                    items[-1][0].append(ln)
+            # Continue the open list when this paragraph carries on from it: more bullets, or
+            # the next number. "1." after "2." starts a new list.
+            if run is not None and run["ordered"] == ordered and (not ordered or numbers[0] == run["next"]):
+                run["items"][-1][1] = True
+                run["items"].extend(items)
+            else:
+                close_run()
+                run = {"ordered": ordered, "items": items, "first": numbers[0] if ordered else 1}
+            if ordered:
+                run["next"] = numbers[0] + len(numbers)
+            continue
+        close_run()
+        if all(_QUOTE.match(ln) for ln in lines):
             body = "<br>".join(_inline(_QUOTE.match(ln).group(1)) for ln in lines)
             blocks.append(f'<p style="{line};margin-left:24pt">{span}{body}</span></p>')
         else:
             body = "<br>".join(_inline(ln.strip()) for ln in lines)
             blocks.append(f'<p style="{line}">{span}{body}</span></p>')
+    close_run()
     return ("\n" + _blank(style) + "\n").join(blocks)
 
 

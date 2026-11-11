@@ -1,5 +1,5 @@
 """
-Live check of the draft handling added in 0.11.2, over stdio against the running classic
+Live check of draft handling (attachments, open windows, moves, numbered lists), over stdio against the running classic
 Outlook. Needs Outlook open.
 
 It WRITES, but only to one item of its own: a draft "[outlook-mcp live check] delete me" in the
@@ -114,7 +114,8 @@ async def run():
 
                 health = await call("health_check")
                 log(f"server {health.get('server_version')} / Outlook {health.get('outlook_version')}")
-                check(health.get("server_version") == "0.11.2", "health_check reports 0.11.2")
+                from outlook_desktop_mcp import __version__
+                check(health.get("server_version") == __version__, f"health_check reports {__version__}")
 
                 log("\ndraft_email with a missing attachment path")
                 r = await call("draft_email", to="live-check@example.com", subject=SUBJECT, body="never saved",
@@ -123,11 +124,18 @@ async def run():
 
                 log("\ndraft_email with one attachment")
                 r = await call("draft_email", to="live-check@example.com", subject=SUBJECT,
-                               body="Live check of outlook-desktop-mcp 0.11.2. Delete me.", attachments=a)
+                               body="Live check of outlook-desktop-mcp. Delete me.\n\n1. First\n\n2. Second\n\n3. Third\n\nEnd.",
+                               attachments=a)
                 check(isinstance(r, dict) and r.get("status") == "draft_saved", "draft saved")
                 check(len(r.get("files_attached", [])) == 1 and "files_failed" not in r, "one file attached, none failed")
                 entry_id = r["entry_id"]
                 own = OwnItem(entry_id)
+
+                log("\nnumbered list with blank lines between items")
+                import re
+                r = await call("read_email", entry_id=entry_id)
+                numbers = re.findall(r"^\s*(\d+)\.\s+(?:First|Second|Third)", str(r.get("body", "")), re.M)
+                check(numbers == ["1", "2", "3"], f"Outlook numbers the items 1, 2, 3 (got {numbers})")
 
                 log("\nadd_attachment")
                 r = await call("add_attachment", entry_id=entry_id, paths=b)
