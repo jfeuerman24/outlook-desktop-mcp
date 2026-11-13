@@ -3,6 +3,23 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## 0.11.5 - 2026-11-13
+
+### Added
+- **Two blank lines above the sign-off, on every draft.** Whatever the text has between its
+  last paragraph and the closing line ("Best," and the name), the draft gets exactly
+  `signoff_blank_lines` empty lines there: 2 by default, and `1` leaves drafts as written.
+  A closing counts only when it stands alone on its line above at most two short lines, so
+  "Thanks again for all your help so far." is still a sentence. `signoff_phrases` lists the
+  closings recognised. It applies to `draft_email`, `draft_reply`, `draft_forward`,
+  `draft_forward_event`, `update_draft` and the body of a meeting, and to `html_body` when
+  the sign-off is its last `<p>`; the signature, the quoted thread and inline answers are
+  not touched.
+
+### Changed
+- Several blank lines in a row in a `body` are that many empty lines in the email. They
+  used to collapse into one.
+
 ## 0.11.4 - 2026-11-13
 
 ### Changed

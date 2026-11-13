@@ -86,7 +86,11 @@ def text_to_html(text: str, color: str = "", indent: str = "") -> str:
     """
     style = font_style(color)
     normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    paragraphs = re.split(r"\n\s*\n", normalized) if normalized else [""]
+    # Paragraphs, and how many blank lines the text has before each: two blank lines typed
+    # are two empty lines in the email, not one.
+    pieces = re.split(r"(\n\s*\n)", normalized) if normalized else [""]
+    paragraphs = pieces[0::2]
+    gaps = [max(1, sep.count("\n") - 1) for sep in pieces[1::2]]
     line = f"margin:0;line-height:100%;{style}"
     left = f";margin-left:{indent};text-indent:0" if indent else ""
     span = f'<span style="{style}">'
@@ -116,7 +120,79 @@ def text_to_html(text: str, color: str = "", indent: str = "") -> str:
         else:
             body = "<br>".join(_inline(ln.strip()) for ln in lines)
             blocks.append(f'<p style="{line}{left}">{span}{body}</span></p>')
-    return ("\n" + _blank(style) + "\n").join(blocks)
+    out = blocks[0]
+    for gap, block in zip(gaps, blocks[1:]):
+        out += "\n" + (_blank(style) + "\n") * gap + block
+    return out
+
+
+# ---------------------------------------------------------------------------
+# The sign-off ("Best," and the name) sits a set number of blank lines below the
+# last paragraph, whatever the caller typed: the signoff_blank_lines setting.
+# ---------------------------------------------------------------------------
+_NAME_MAX = 40
+_P_BLOCK = re.compile(r"<p\b[^>]*>(.*?)</p\s*>", re.I | re.S)
+_BR = re.compile(r"<br\b[^>]*>", re.I)
+
+
+def _signoff_lines() -> int:
+    try:
+        return int(str(settings.get("signoff_blank_lines")).strip())
+    except (TypeError, ValueError):
+        return 2
+
+
+def _is_signoff(lines: list[str]) -> bool:
+    """A closing phrase alone on the first line, then at most two short lines (the name).
+    "Thanks again for all your help." is a sentence, not a sign-off."""
+    lines = [ln.strip() for ln in lines]
+    if not lines or len(lines) > 3 or any(not ln or len(ln) > _NAME_MAX for ln in lines[1:]):
+        return False
+    phrases = {str(p).strip().rstrip(",").lower() for p in (settings.get("signoff_phrases") or [])}
+    return lines[0].rstrip(",.!").strip().lower() in phrases
+
+
+def signoff_gap(text: str) -> str:
+    """``text`` with exactly signoff_blank_lines blank lines above its sign-off; unchanged
+    when there is no sign-off, nothing above it, or the setting is 1 or less."""
+    n = _signoff_lines()
+    if n <= 1 or not (text or "").strip():
+        return text
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").rstrip().split("\n")
+    start = len(lines)
+    while start > 0 and lines[start - 1].strip():
+        start -= 1
+    above = start
+    while above > 0 and not lines[above - 1].strip():
+        above -= 1
+    if above == 0 or not _is_signoff(lines[start:]):
+        return text
+    return "\n".join(lines[:above] + [""] * n + lines[start:])
+
+
+def signoff_gap_html(fragment: str) -> str:
+    """The same for caller-supplied HTML whose sign-off is its last ``<p>`` (lines split by
+    ``<br>``): the empty paragraphs above it become exactly signoff_blank_lines of Word's own.
+    HTML of any other shape comes back unchanged."""
+    n = _signoff_lines()
+    if n <= 1:
+        return fragment
+
+    def text_of(inner: str) -> str:
+        return html.unescape(re.sub(r"<[^>]*>", "", inner)).replace("\xa0", " ").strip()
+
+    blocks = list(_P_BLOCK.finditer(fragment or ""))
+    while blocks and not text_of(blocks[-1].group(1)):
+        blocks.pop()
+    if len(blocks) < 2 or not _is_signoff([text_of(part) for part in _BR.split(blocks[-1].group(1))]):
+        return fragment
+    first = len(blocks) - 1  # the first of the empty paragraphs directly above the sign-off
+    while (first > 0 and not text_of(blocks[first - 1].group(1))
+           and not fragment[blocks[first - 1].end():blocks[first].start()].strip()):
+        first -= 1
+    if not text_of(fragment[:blocks[first].start()]):
+        return fragment
+    return fragment[:blocks[first].start()] + _blank(font_style()) * n + fragment[blocks[-1].start():]
 
 
 def style_html(fragment: str) -> str:

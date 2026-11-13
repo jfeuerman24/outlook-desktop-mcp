@@ -108,7 +108,7 @@ async def run():
     from mcp.client.session import ClientSession
 
     own = Own()
-    env = {**os.environ, "PYTHONPATH": os.path.join(ROOT, "src")}
+    env = {**os.environ, "PYTHONPATH": os.path.join(ROOT, "src"), "OUTLOOK_MCP_SIGNOFF_BLANK_LINES": "2"}
     params = StdioServerParameters(command=sys.executable, args=["-m", "outlook_desktop_mcp"], cwd=ROOT, env=env)
     try:
         async with stdio_client(params) as (read, write):
@@ -125,10 +125,23 @@ async def run():
 
                 log("draft_email: three paragraphs and a numbered list with blank lines between items")
                 r = await call("draft_email", to="live-check@example.com", subject=SUBJECT,
-                               body="First paragraph.\n\nSecond paragraph.\n\n1. One\n\n2. Two\n\n3. Three\n\nLast paragraph.")
+                               body="First paragraph.\n\nSecond paragraph.\n\n1. One\n\n2. Two\n\n3. Three\n\n"
+                                    "Last paragraph.\n\nBest,\nJake")
                 check(isinstance(r, dict) and r.get("status") == "draft_saved", "draft saved")
-                own.ids.append(r["entry_id"])
-                paras = own.paragraphs(r["entry_id"])
+                plain = r["entry_id"]
+                own.ids.append(plain)
+                paras = own.paragraphs(plain)
+                z = find(paras, "Last paragraph")
+                check([p["text"] for p in paras[z + 1:z + 3]] == ["\r", "\r"] and paras[z + 3]["text"].startswith("Best,"),
+                      "exactly two empty lines between the last paragraph and the sign-off")
+                check("Jake" in paras[z + 3]["text"], f"the name is on the line under it: {paras[z + 3]['text']!r}")
+                r = await call("update_draft", entry_id=plain, body="Changed text.\n\n\n\n\nBest regards,\nJake")
+                check(isinstance(r, dict) and r.get("status") == "draft_saved", "update_draft saved")
+                after = own.paragraphs(plain)
+                c = find(after, "Changed text")
+                check([p["text"] for p in after[c + 1:c + 3]] == ["\r", "\r"] and after[c + 3]["text"].startswith("Best regards,"),
+                      "update_draft: four blank lines typed become exactly two")
+                check(not any("Last paragraph" in p["text"] for p in after), "update_draft replaced only the note")
                 a, z = find(paras, "First paragraph"), find(paras, "Last paragraph")
                 note = paras[a:z + 1]
                 for p in note:

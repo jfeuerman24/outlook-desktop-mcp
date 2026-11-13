@@ -311,6 +311,8 @@ Claude's config, which then overrides the file.
 | `hide_accounts` | `OUTLOOK_MCP_HIDE_ACCOUNTS` | none | Mailboxes (name substrings, `;`-separated) left out of `list_accounts` and `account="all"`; still reachable by name |
 | `open_in_outlook` | `OUTLOOK_MCP_OPEN_IN_OUTLOOK` | `meetings` | Which saved drafts open in an Outlook window: `meetings` (unsent invitations only), `all`, or `none`. `open_drafts` (true/false) is the older name and still works until this one is set |
 | `font_family`, `font_size_pt`, `font_color` | `OUTLOOK_MCP_FONT_*` | Aptos, 12, black | Font for the text the server writes into drafts |
+| `signoff_blank_lines` | `OUTLOOK_MCP_SIGNOFF_BLANK_LINES` | 2 | Blank lines between the last paragraph and the sign-off line ("Best,") in every draft; drafts are adjusted to exactly this many. `1` leaves drafts as written |
+| `signoff_phrases` | `OUTLOOK_MCP_SIGNOFF_PHRASES` | Best; Regards; Thanks; Cheers; Sincerely and similar | Closing lines (`;`-separated) recognised as a sign-off when they stand alone above at most two short lines |
 | `inline_color` | `OUTLOOK_MCP_INLINE_COLOR` | `#C00000` (dark red) | Colour of the answers `draft_reply` writes inside the quoted message (`inline_replies`) |
 | `plain_text` | `OUTLOOK_MCP_PLAIN_TEXT` | off | Write drafts as plain text instead of styled HTML |
 | `include_shared_in_all` | `OUTLOOK_MCP_INCLUDE_SHARED_IN_ALL` | off | Include shared, non-cached mailboxes in `account="all"` searches (slow) |

@@ -80,6 +80,56 @@ class StyleTests(unittest.TestCase):
         self.assertEqual(out.count("<o:p>&nbsp;</o:p>"), 2)
         self.assertEqual(out.count("&nbsp;"), 2)  # no bare non-breaking space anywhere
 
+    def test_two_blank_lines_typed_are_two_empty_paragraphs(self):
+        self.assertEqual(h.text_to_html("One\n\n\nTwo").count("<o:p>&nbsp;</o:p>"), 2)
+        self.assertEqual(h.text_to_html("One\n\n\n\nTwo\n\nThree").count("<o:p>&nbsp;</o:p>"), 4)
+
+    def test_signoff_gets_exactly_two_blank_lines(self):
+        want = "Thanks again for all your help so far.\n\n\nBest,\nJake"
+        self.assertEqual(h.signoff_gap("Thanks again for all your help so far.\n\nBest,\nJake"), want)
+        self.assertEqual(h.signoff_gap(want), want)  # already two: still two
+        self.assertEqual(h.signoff_gap("so far.\n\n\n\n\nBest,\nJake\n"), "so far.\n\n\nBest,\nJake")
+        self.assertEqual(h.signoff_gap("so far.\nbest regards\nJake Feuerman\nHeartland"),
+                         "so far.\nbest regards\nJake Feuerman\nHeartland")  # no blank line: one paragraph
+        html_out = h.text_to_html(h.signoff_gap("Body.\n\nBest,\nJake"))
+        self.assertEqual(html_out.count("<o:p>&nbsp;</o:p>"), 2)
+        self.assertIn("Best,<br>Jake", html_out)  # the name stays on the next line
+
+    def test_a_sentence_or_no_closing_is_left_alone(self):
+        for text in ("One.\n\nThanks again for all your help so far.",
+                     "One.\n\nTwo.",
+                     "Best,\nJake",
+                     "One.\n\nBest,\nJake\nHeartland Growth Partners\n555-0100",  # four lines: not a sign-off
+                     "One.\n\nBest,\n" + "x" * 41,
+                     ""):
+            self.assertEqual(h.signoff_gap(text), text)
+        self.assertEqual(h.signoff_gap("Thanks again for your help.\n\nThanks,\nJake"),
+                         "Thanks again for your help.\n\n\nThanks,\nJake")
+
+    def test_signoff_settings(self):
+        with mock.patch.dict(os.environ, {"OUTLOOK_MCP_SIGNOFF_BLANK_LINES": "1"}):
+            self.assertEqual(h.signoff_gap("One.\n\nBest,\nJake"), "One.\n\nBest,\nJake")
+            self.assertEqual(h.signoff_gap("One.\n\n\n\nBest,\nJake"), "One.\n\n\n\nBest,\nJake")
+        with mock.patch.dict(os.environ, {"OUTLOOK_MCP_SIGNOFF_BLANK_LINES": "3",
+                                          "OUTLOOK_MCP_SIGNOFF_PHRASES": "Onward; Yours"}):
+            self.assertEqual(h.signoff_gap("One.\n\nOnward,\nJake"), "One.\n\n\n\nOnward,\nJake")
+            self.assertEqual(h.signoff_gap("One.\n\nBest,\nJake"), "One.\n\nBest,\nJake")
+
+    def test_signoff_in_caller_html(self):
+        blank = '<p style="margin:0">&nbsp;</p>'
+        frag = f'<p>Body one.</p>{blank}<p>Thanks again for everything.</p>{blank}<p>Best,<br>Jake</p>'
+        out = h.signoff_gap_html(frag)
+        tail = out[out.index("Thanks again"):]
+        self.assertEqual(tail.count("<o:p>&nbsp;</o:p>"), 2)
+        self.assertNotIn(blank, tail)
+        self.assertTrue(out.endswith("<p>Best,<br>Jake</p>"))
+        self.assertIn(f"<p>Body one.</p>{blank}<p>Thanks again", out)  # other gaps untouched
+        self.assertEqual(h.signoff_gap_html(out), out)
+        none_above = "<p>Body.</p><p>Best,<br>Jake</p>"
+        self.assertEqual(h.signoff_gap_html(none_above).count("<o:p>&nbsp;</o:p>"), 2)
+        for same in ("<p>One.</p><p>Two.</p>", "<div>Body</div><div>Best,<br>Jake</div>", "<p>Best,<br>Jake</p>"):
+            self.assertEqual(h.signoff_gap_html(same), same)
+
     def test_numbered_list_starts_at_the_number_typed(self):
         out = h.text_to_html("3. A\n4) B")
         self.assertEqual(out.count("<ol"), 1)

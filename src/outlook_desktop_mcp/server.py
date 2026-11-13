@@ -41,7 +41,7 @@ from outlook_desktop_mcp.utils.extract import extract
 from outlook_desktop_mcp.utils.text import DEFAULT_BODY_CHARS
 from outlook_desktop_mcp.utils.html import (
     DEFAULT_INLINE_COLOR, inject_into_body, insert_inline, plain_text_mode, replace_note, strip_inline,
-    style_html, text_to_html, wrap_note,
+    signoff_gap, signoff_gap_html, style_html, text_to_html, wrap_note,
 )
 from outlook_desktop_mcp.tools._folder_constants import (
     FOLDER_NAME_TO_ENUM,
@@ -488,11 +488,12 @@ def _write_draft_text(item, body: str, html_body: str = "") -> None:
         item.GetInspector
     except Exception:
         pass
+    body = signoff_gap(body)
     if plain_text_mode():
         existing = str(_safe_get(lambda: item.Body) or "")
         item.Body = body + ("\n\n" + existing if existing.strip() else "")
         return
-    fragment = wrap_note(style_html(html_body) if html_body else text_to_html(body))
+    fragment = wrap_note(style_html(signoff_gap_html(html_body)) if html_body else text_to_html(body))
     item.HTMLBody = inject_into_body(str(_safe_get(lambda: item.HTMLBody) or ""), fragment)
 
 
@@ -2546,7 +2547,7 @@ async def create_event(
         if location:
             appt.Location = location
         if body:
-            appt.Body = body
+            appt.Body = signoff_gap(body)
         appt.AllDayEvent = all_day
         if reminder_minutes > 0:
             appt.ReminderSet = True
@@ -2667,7 +2668,7 @@ async def draft_meeting(
         if location:
             appt.Location = location
         if body:
-            appt.Body = body
+            appt.Body = signoff_gap(body)
 
         for addr in required_attendees.split(";"):
             addr = addr.strip()
@@ -3771,6 +3772,9 @@ async def set_setting(key: str, value: str = "", clear: bool = False) -> str:
             tool opens any item on request. (open_drafts is the older
             true/false name for the same thing.)
         font_family, font_size_pt, font_color, plain_text: how draft text is written.
+        signoff_blank_lines: blank lines above the sign-off ("Best,") in every
+            draft; default 2, and 1 leaves drafts as written. signoff_phrases:
+            the closing lines recognised, semicolon-separated.
         include_shared_in_all: "true" to include shared, non-cached mailboxes in
             account="all" searches (slow); default false.
         call_timeout_s: seconds a tool call may take (default 60); long searches
@@ -4313,10 +4317,10 @@ async def update_draft(
             changed.append("bcc")
         if body or html_body:
             if plain_text_mode():
-                item.Body = body or html_body
+                item.Body = signoff_gap(body or html_body)
                 changed.append("body (plain text, whole body replaced)")
             else:
-                fragment = style_html(html_body) if html_body else text_to_html(body)
+                fragment = style_html(signoff_gap_html(html_body)) if html_body else text_to_html(signoff_gap(body))
                 current = str(_safe_get(lambda: item.HTMLBody) or "")
                 new_html = replace_note(current, fragment)
                 if new_html is None:

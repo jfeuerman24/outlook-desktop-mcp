@@ -56,6 +56,18 @@ SETTINGS: dict[str, dict] = {
     "inline_color": {"env": "OUTLOOK_MCP_INLINE_COLOR", "type": "str", "default": "#C00000",
                      "help": "Colour of answers draft_reply writes inside the quoted message "
                              "(inline_replies). Default dark red."},
+    "signoff_blank_lines": {
+        "env": "OUTLOOK_MCP_SIGNOFF_BLANK_LINES", "type": "str", "default": "2",
+        "help": "Blank lines between the last paragraph of a draft and its sign-off line (\"Best,\"). "
+                "Drafts are adjusted to exactly this many. 1 = leave drafts as written.",
+    },
+    "signoff_phrases": {
+        "env": "OUTLOOK_MCP_SIGNOFF_PHRASES", "type": "list",
+        "default": ["Best", "Best regards", "Regards", "Kind regards", "Warm regards", "Thanks", "Thank you",
+                    "Many thanks", "Cheers", "Sincerely", "All the best"],
+        "help": "Closing lines (semicolon-separated, case and trailing comma ignored) recognised as a "
+                "sign-off when they stand alone above at most two short lines such as the name.",
+    },
     "include_shared_in_all": {
         "env": "OUTLOOK_MCP_INCLUDE_SHARED_IN_ALL", "type": "bool", "default": False,
         "help": "Include shared Exchange mailboxes that are not cached locally in account=\"all\" "
