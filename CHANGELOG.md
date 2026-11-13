@@ -3,6 +3,28 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## 0.11.4 - 2026-11-13
+
+### Changed
+- **Inline answers line up with the text they answer.** Word writes a numbered item as a
+  paragraph with a left indent and the number hanging to its left; an answer placed under
+  it sat at the margin, under the number. It now takes the item's left indent (from the
+  paragraph's own style, or the rule for its class), with no hanging indent and no number,
+  so it reads as belonging to the item. Nested items work the same way. Seven answers had
+  to be indented by hand through the Paragraph dialog.
+- **One blank line follows each inline answer**, unless the message already has one there.
+  A blank line typed inside an answer is kept.
+
+### Fixed
+- **Blank lines the server wrote had a character on them.** They were paragraphs holding a
+  non-breaking space, which Word keeps: click the line and the cursor sits after a space.
+  They are now written the way Word writes an empty paragraph, which stores nothing, in the
+  top note and in inline answers alike. Office's namespace is declared on the message when
+  it is missing, since Word needs it to read that form.
+- **Gaps are empty paragraphs, never spacing.** 0.11.3 put a bottom margin under a numbered
+  item that was followed by a blank line. Each such item is now its own list starting at
+  the number typed, with a real empty line between, and Outlook still counts 1, 2, 3.
+
 ## 0.11.3 - 2026-11-11
 
 ### Fixed

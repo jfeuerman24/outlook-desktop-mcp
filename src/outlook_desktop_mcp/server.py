@@ -1706,7 +1706,8 @@ async def draft_reply(
     questions or points "inline", "in red" or "below each point", pass
     inline_replies: each answer is written inside the quoted message, right
     under the paragraph it answers, in the inline_color setting (dark red by
-    default), the way people answer a numbered list in Outlook. body is then
+    default), the way people answer a numbered list in Outlook, lined up with
+    the item's text and followed by one blank line. body is then
     short ("See below."). Preview it in the chat as pairs: the quoted line,
     then the answer marked (red). Never offer an HTML file for this instead.
 

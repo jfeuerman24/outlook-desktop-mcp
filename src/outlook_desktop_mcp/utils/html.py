@@ -60,11 +60,16 @@ def _item_html(lines: list[str]) -> str:
 
 
 def _blank(style: str) -> str:
-    """One empty single-spaced line, used between blocks."""
-    return f'<p style="margin:0;line-height:100%;{style}"><span style="{style}">&nbsp;</span></p>'
+    """One empty single-spaced line, used between blocks: what pressing Enter gives.
+
+    ``<o:p>&nbsp;</o:p>`` is how Word itself writes an empty paragraph, and it stores no
+    character. A bare ``&nbsp;`` is kept as a real non-breaking space on the line, which the
+    user finds with the cursor. Gaps are always empty paragraphs, never margins or spacing.
+    """
+    return f'<p style="margin:0;line-height:100%;{style}"><span style="{style}"><o:p>&nbsp;</o:p></span></p>'
 
 
-def text_to_html(text: str, color: str = "") -> str:
+def text_to_html(text: str, color: str = "", indent: str = "") -> str:
     """Turn plain text into styled, single-spaced HTML, understanding a little structure.
 
     Every line is exactly one line (``line-height:100%``, no paragraph spacing) and a
@@ -72,70 +77,45 @@ def text_to_html(text: str, color: str = "") -> str:
     person typing in Outlook gets. Within a paragraph, single newlines become ``<br>``.
     A paragraph whose lines start with ``1.`` / ``2)`` becomes a numbered list, one with
     ``-``, ``*`` or ``\u2022`` a bulleted list; a line without a marker continues the
-    previous item on its own line. Items separated by blank lines stay one list (the blank
-    line becomes space under the item), and a numbered list starts at the number typed.
-    A paragraph whose lines start with ``>`` is indented
-    (useful for text the reader should copy). ``**bold**`` works anywhere. Everything
-    else is escaped literally. ``color`` overrides the font_color setting.
+    previous item on its own line. A numbered list starts at the number typed, so items
+    separated by blank lines keep counting 1, 2, 3 with a real empty line between them
+    (Outlook numbers every list from 1 otherwise). A paragraph whose lines start with ``>``
+    is indented (useful for text the reader should copy). ``**bold**`` works anywhere.
+    Everything else is escaped literally. ``color`` overrides the font_color setting;
+    ``indent`` is a CSS length for the left indent of every block (inline answers use it).
     """
     style = font_style(color)
-    size = str(settings.get("font_size_pt") or DEFAULT_SIZE_PT).strip() or DEFAULT_SIZE_PT
     normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     paragraphs = re.split(r"\n\s*\n", normalized) if normalized else [""]
     line = f"margin:0;line-height:100%;{style}"
-    spaced = f"margin:0 0 {size}pt 0;line-height:100%;{style}"  # an item with a blank line after it
+    left = f";margin-left:{indent};text-indent:0" if indent else ""
     span = f'<span style="{style}">'
-    blocks: list[str] = []
-    # The list being built: items separated by blank lines are still ONE list. A list per
-    # paragraph makes every item its own list, and Outlook numbers each of those "1.".
-    run: dict | None = None
-
-    def close_run() -> None:
-        nonlocal run
-        if run is None:
-            return
-        tag = "ol" if run["ordered"] else "ul"
-        li = "".join(f'<li style="{spaced if gap else line}">{span}{_item_html(item)}</span></li>'
-                     for item, gap in run["items"])
-        start = f' start="{run["first"]}"' if run["ordered"] and run["first"] != 1 else ""
-        blocks.append(f'<{tag} style="margin:0;padding-left:24pt;{line}"{start}>{li}</{tag}>')
-        run = None
-
+    blocks = []
     for paragraph in paragraphs:
         lines = paragraph.strip().split("\n")
         first = lines[0]
         if _OL_ITEM.match(first) or _UL_ITEM.match(first):
             ordered = bool(_OL_ITEM.match(first))
             pattern = _OL_ITEM if ordered else _UL_ITEM
-            items: list[list] = []
-            numbers: list[int] = []
+            items: list[list[str]] = []
             for ln in lines:
                 m = pattern.match(ln)
                 if m:
-                    items.append([[m.group(2) if ordered else m.group(1)], False])
-                    if ordered:
-                        numbers.append(int(m.group(1)))
+                    items.append([m.group(2) if ordered else m.group(1)])
                 elif items:
-                    items[-1][0].append(ln)
-            # Continue the open list when this paragraph carries on from it: more bullets, or
-            # the next number. "1." after "2." starts a new list.
-            if run is not None and run["ordered"] == ordered and (not ordered or numbers[0] == run["next"]):
-                run["items"][-1][1] = True
-                run["items"].extend(items)
-            else:
-                close_run()
-                run = {"ordered": ordered, "items": items, "first": numbers[0] if ordered else 1}
-            if ordered:
-                run["next"] = numbers[0] + len(numbers)
-            continue
-        close_run()
-        if all(_QUOTE.match(ln) for ln in lines):
+                    items[-1].append(ln)
+            tag = "ol" if ordered else "ul"
+            number = int(_OL_ITEM.match(first).group(1)) if ordered else 1
+            start = f' start="{number}"' if number != 1 else ""
+            li = "".join(f'<li style="{line}">{span}{_item_html(item)}</span></li>' for item in items)
+            margin = f";margin-left:{indent}" if indent else ""
+            blocks.append(f'<{tag} style="margin:0;padding-left:24pt;{line}{margin}"{start}>{li}</{tag}>')
+        elif all(_QUOTE.match(ln) for ln in lines):
             body = "<br>".join(_inline(_QUOTE.match(ln).group(1)) for ln in lines)
             blocks.append(f'<p style="{line};margin-left:24pt">{span}{body}</span></p>')
         else:
             body = "<br>".join(_inline(ln.strip()) for ln in lines)
-            blocks.append(f'<p style="{line}">{span}{body}</span></p>')
-    close_run()
+            blocks.append(f'<p style="{line}{left}">{span}{body}</span></p>')
     return ("\n" + _blank(style) + "\n").join(blocks)
 
 
@@ -144,8 +124,23 @@ def style_html(fragment: str) -> str:
     return f'<div style="{font_style()}">{fragment}</div>'
 
 
+_HTML_OPEN = re.compile(r"<html\b[^>]*>", re.I)
+_OFFICE_NS = 'xmlns:o="urn:schemas-microsoft-com:office:office"'
+
+
+def ensure_office_ns(document: str) -> str:
+    """``document`` with Office's ``o:`` namespace declared on <html>. Word reads the
+    ``<o:p>`` of an empty paragraph only when it is; in a message that came from somewhere
+    else the ``&nbsp;`` inside would be kept as a character on the blank line."""
+    match = _HTML_OPEN.search(document or "")
+    if not match or "xmlns:o" in match.group(0).lower():
+        return document or ""
+    return document[:match.end() - 1] + " " + _OFFICE_NS + document[match.end() - 1:]
+
+
 def inject_into_body(document: str, fragment: str) -> str:
     """Insert ``fragment`` right after ``<body>`` so it sits above Outlook's quoted history."""
+    document = ensure_office_ns(document)
     match = _BODY_OPEN.search(document or "")
     if not match:
         return fragment + (document or "")
@@ -187,7 +182,7 @@ def replace_note(document: str, fragment: str) -> str | None:
     if span is None:
         return None
     start, end = span
-    return document[:start] + wrap_note(fragment) + document[end:]
+    return ensure_office_ns(document[:start] + wrap_note(fragment) + document[end:])
 
 
 # ---------------------------------------------------------------------------
@@ -263,13 +258,70 @@ def find_anchor(document: str, anchor: str, start: int = 0) -> int | None:
     return ends[idx + len(needle) - 1]
 
 
-def inline_html(text: str, color: str) -> tuple[str, str]:
+_CSS_LENGTH = r"(-?[0-9]*\.?[0-9]+)\s*(in|pt|px|cm|mm|pc|em)?"
+_MARGIN_LEFT = re.compile(r"margin-left\s*:\s*" + _CSS_LENGTH, re.I)
+_MARGIN_4 = re.compile(r"margin\s*:\s*\S+\s+\S+\s+\S+\s+" + _CSS_LENGTH, re.I)
+_TAG_STYLE = re.compile(r"\bstyle\s*=\s*(\"[^\"]*\"|'[^']*')", re.I)
+_TAG_CLASS = re.compile(r"\bclass\s*=\s*[\"']?([\w-]+)", re.I)
+_P_OPEN = re.compile(r"<p\b[^>]*>", re.I)
+_NEXT_P = re.compile(r"\s*<p\b[^>]*>(.*?)</p\s*>", re.I | re.S)
+
+
+def _css_left(css: str) -> str | None:
+    """The left margin a CSS declaration block sets ("" for zero), or None if it sets none."""
+    found = None
+    for m in list(_MARGIN_4.finditer(css or "")) + list(_MARGIN_LEFT.finditer(css or "")):
+        found = m
+    if found is None:
+        return None
+    try:
+        if float(found.group(1)) <= 0:
+            return ""
+    except ValueError:
+        return None
+    return found.group(1) + (found.group(2) or "pt").lower()
+
+
+def left_indent(tag: str, document: str) -> str:
+    """Where the text of the paragraph opened by ``tag`` starts, as a CSS length ("" for the
+    margin). Word writes a numbered item as a paragraph with a left margin and a negative
+    first-line indent, so the margin is where the text sits and the number hangs to its left.
+    The margin is on the tag itself or, failing that, in the <style> rule for its class."""
+    style = _TAG_STYLE.search(tag or "")
+    if style:
+        left = _css_left(style.group(1))
+        if left is not None:
+            return left
+    cls = _TAG_CLASS.search(tag or "")
+    if cls:
+        rule = re.search(r"(?<![\w.-])p\." + re.escape(cls.group(1)) + r"\b[^{}]*\{([^}]*)\}", document or "", re.I)
+        if rule:
+            return _css_left(rule.group(1)) or ""
+    return ""
+
+
+def _blank_follows(document: str, pos: int) -> bool:
+    """True when the next thing at ``pos`` is already an empty paragraph."""
+    m = _NEXT_P.match(document, pos)
+    if not m:
+        return False
+    return not html.unescape(re.sub(r"<[^>]*>", "", m.group(1))).replace("\xa0", " ").strip()
+
+
+def inline_html(text: str, color: str, indent: str = "", blank_after: bool = True) -> tuple[str, str]:
     """Two renderings of one inline answer, both tagged with INLINE_CLASS: a block (styled
-    paragraphs, for after a paragraph) and a line (a span and a <br>, for after a <br>)."""
+    paragraphs, for after a paragraph) and a line (a span and a <br>, for after a <br>).
+    ``indent`` lines the block up with the text it answers; ``blank_after`` adds one empty
+    line under the answer (an empty paragraph, or an empty line among <br> lines)."""
     style = font_style(color)
-    block = re.sub(r"<(p|ol|ul) style=", rf'<\1 class="{INLINE_CLASS}" style=', text_to_html(text, color))
+    block = text_to_html(text, color, indent)
+    if blank_after:
+        block += "\n" + _blank(style)
+    block = re.sub(r"<(p|ol|ul) style=", rf'<\1 class="{INLINE_CLASS}" style=', block)
     lines = [_inline(ln.strip()) for ln in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")]
     line = f'<span class="{INLINE_CLASS}" style="{style}">' + "<br>".join(lines) + "</span><br>"
+    if blank_after:
+        line += f'<span class="{INLINE_CLASS}"><br></span>'
     return block, line
 
 
@@ -277,8 +329,11 @@ def insert_inline(document: str, answers, color: str = DEFAULT_INLINE_COLOR) -> 
     """Write each ``(anchor, text)`` answer into ``document`` after the block that contains
     the anchor: after the closing ``</p>``/``</div>``, inside a ``</li>``/``</td>``, or as a
     line after a ``<br>``. Each search starts where the previous answer went in, so a
-    phrase that repeats resolves in document order. Returns the new document and the
-    anchors not found; when any is missing the document comes back unchanged."""
+    phrase that repeats resolves in document order. An answer under a paragraph takes that
+    paragraph's left indent, so under a numbered item it lines up with the item's text and
+    not its number, and one empty line follows each answer unless one is already there.
+    Returns the new document and the anchors not found; when any is missing the document
+    comes back unchanged."""
     out = document or ""
     cursor = 0
     missing: list[str] = []
@@ -287,22 +342,29 @@ def insert_inline(document: str, answers, color: str = DEFAULT_INLINE_COLOR) -> 
         if pos is None:
             missing.append(anchor)
             continue
-        block, line = inline_html(text, color)
         m = _BLOCK_END.search(out, pos)
         if m is None:
             end = _BODY_CLOSE.search(out, pos)
-            insert_at, fragment = (end.start() if end else len(out)), block
+            insert_at = end.start() if end else len(out)
+            fragment = inline_html(text, color)[0]
         elif m.group(1):
-            insert_at, fragment = m.end(), block
+            insert_at = m.end()
+            indent = ""
+            if m.group(1).lower() == "p":
+                opens = list(_P_OPEN.finditer(out, 0, m.start()))
+                indent = left_indent(opens[-1].group(0), out) if opens else ""
+            fragment = inline_html(text, color, indent, not _blank_follows(out, insert_at))[0]
         elif m.group(2):
-            insert_at, fragment = m.start(), block
+            insert_at = m.start()
+            fragment = inline_html(text, color)[0]
         else:
-            insert_at, fragment = m.end(), line
+            insert_at = m.end()
+            fragment = inline_html(text, color, "", not re.match(r"\s*<br\b", out[insert_at:], re.I))[1]
         out = out[:insert_at] + fragment + out[insert_at:]
         cursor = insert_at + len(fragment)
     if missing:
         return document or "", missing
-    return out, []
+    return ensure_office_ns(out), []
 
 
 def strip_inline(document: str) -> str:

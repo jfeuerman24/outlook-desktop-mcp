@@ -39,7 +39,11 @@ class StyleTests(unittest.TestCase):
         doc = '<html><head></head><body lang="EN-US" style="x"><div>From: old</div></body></html>'
         out = h.inject_into_body(doc, "<p>new</p>")
         self.assertLess(out.index("<p>new</p>"), out.index("<div>From: old</div>"))
-        self.assertTrue(out.startswith('<html><head></head><body lang="EN-US" style="x">'))
+        # Word reads the <o:p> of an empty paragraph only with Office's namespace declared.
+        self.assertTrue(out.startswith(
+            '<html xmlns:o="urn:schemas-microsoft-com:office:office"><head></head><body lang="EN-US" style="x">'))
+        declared = '<html xmlns:o="urn:x" xmlns="y"><body><p>old</p></body></html>'
+        self.assertEqual(h.ensure_office_ns(declared), declared)
         self.assertEqual(h.inject_into_body("", "<p>x</p>"), "<p>x</p>")
 
     def test_style_html_wraps(self):
@@ -63,33 +67,29 @@ class StyleTests(unittest.TestCase):
         self.assertIn("Done &amp; dusted.", out)
         self.assertNotIn("**", out)
 
-    def test_items_separated_by_blank_lines_are_one_list(self):
+    def test_items_separated_by_blank_lines_keep_their_numbers_and_get_real_blank_lines(self):
         out = h.text_to_html("Changes:\n\n1. A\n\n2. B\n\n3. C\n\nJake")
-        self.assertEqual(out.count("<ol"), 1)
         self.assertEqual(out.count("<li"), 3)
-        self.assertEqual(out.count("margin:0 0 12pt 0"), 2)  # space under A and B, not under C
-        self.assertEqual(out.count("&nbsp;"), 2)  # blank lines only around the list
-        self.assertNotIn("start=", out)
+        self.assertNotIn('start="1"', out)
+        self.assertLess(out.index('start="2"'), out.index('start="3"'))
+        self.assertEqual(out.count("<o:p>&nbsp;</o:p>"), 4)  # an empty paragraph for every blank line
+        self.assertNotIn("12pt 0", out)  # gaps are never margins
+
+    def test_blank_lines_are_empty_paragraphs_with_no_character(self):
+        out = h.text_to_html("One\n\nTwo\n\nThree")
+        self.assertEqual(out.count("<o:p>&nbsp;</o:p>"), 2)
+        self.assertEqual(out.count("&nbsp;"), 2)  # no bare non-breaking space anywhere
 
     def test_numbered_list_starts_at_the_number_typed(self):
-        out = h.text_to_html("3. A\n\n4) B")
+        out = h.text_to_html("3. A\n4) B")
         self.assertEqual(out.count("<ol"), 1)
         self.assertIn('start="3"', out)
         self.assertTrue(out.startswith("<ol style="))  # inline answers tag the list by this prefix
 
-    def test_a_restart_or_a_paragraph_between_ends_the_list(self):
-        out = h.text_to_html("1. A\n\n2. B\n\nOutro\n\n1. X\n\n1. Y")
-        self.assertEqual(out.count("<ol"), 3)
-        self.assertNotIn("start=", out)
-        resumed = h.text_to_html("1. A\n\nAside\n\n2. B")
-        self.assertEqual(resumed.count("<ol"), 2)
-        self.assertIn('start="2"', resumed)
-
-    def test_bullets_across_blank_lines_and_mixed_kinds(self):
-        out = h.text_to_html("- A\n\n- B\n\n1. X")
-        self.assertEqual(out.count("<ul"), 1)
-        self.assertEqual(out.count("<ol"), 1)
-        self.assertEqual(out.count("<li"), 3)
+    def test_indent_applies_to_every_block(self):
+        out = h.text_to_html("Reject.\n\n- a\n- b", "#C00000", indent=".5in")
+        self.assertIn("margin-left:.5in;text-indent:0", out)
+        self.assertEqual(out.count("margin-left:.5in"), 2)  # the paragraph and the list, not the blank line
 
     def test_number_mid_sentence_is_not_a_list(self):
         self.assertNotIn("<ol", h.text_to_html("See section 1. It says so."))
@@ -163,14 +163,43 @@ class InlineAnswerTests(unittest.TestCase):
         out, missing = h.insert_inline(QUOTED, [("Term: One year", "Confirmed, one year.")])
         self.assertEqual(missing, [])
         li_end = out.index("</li>")
-        self.assertTrue(out[:li_end].endswith("Confirmed, one year.</span></p>"))
+        self.assertIn("Confirmed, one year.</span></p>", out[:li_end])
+        self.assertTrue(out[:li_end].endswith("<o:p>&nbsp;</o:p></span></p>"))  # one empty line under it
         self.assertIn("Confirm ok.</i>", out[:li_end])
 
     def test_answer_after_a_line_break_is_a_line(self):
         out, missing = h.insert_inline(QUOTED, [("Line one", "Yes.")])
         self.assertEqual(missing, [])
         self.assertIn(f'Line one<br><span class="{h.INLINE_CLASS}" style="', out)
-        self.assertIn(">Yes.</span><br>Line two", out)
+        self.assertIn(f'>Yes.</span><br><span class="{h.INLINE_CLASS}"><br></span>Line two', out)
+
+    def test_answer_lines_up_with_the_text_of_a_numbered_item(self):
+        doc = ('<html><head><style>p.MsoListParagraph, li.MsoListParagraph\n{margin-top:0in;margin-left:.5in;}'
+               '</style></head><body>'
+               "<p class=MsoListParagraph style='text-indent:-.25in;mso-list:l0 level1 lfo1'>19. Restricted Business. "
+               'Confirm reject.<o:p></o:p></p>'
+               "<p class=MsoListParagraph style='margin-left:1.0in;text-indent:-.25in'>(a) Sub item.<o:p></o:p></p>"
+               '<p class=MsoNormal>Plain paragraph.<o:p></o:p></p>'
+               '<p class=MsoNormal><o:p>&nbsp;</o:p></p>'
+               '<p class=MsoNormal>Last.</p></body></html>')
+        out, missing = h.insert_inline(doc, [("Restricted Business", "JF: Reject."), ("Sub item", "JF: Fine."),
+                                             ("Plain paragraph", "JF: Ok.")])
+        self.assertEqual(missing, [])
+        top = out[out.index("JF: Reject.") - 400:out.index("JF: Reject.")]
+        self.assertIn("margin-left:.5in;text-indent:0", top)      # from the class rule: the text, not the number
+        sub = out[out.index("JF: Fine.") - 400:out.index("JF: Fine.")]
+        self.assertIn("margin-left:1.0in;text-indent:0", sub)     # from the item's own style
+        plain = out[out.index("JF: Ok.") - 400:out.index("JF: Ok.")]
+        self.assertNotIn("margin-left", plain.split("</p>")[-1])
+        # one empty line after each answer, except where the message already has one
+        self.assertEqual(out.count(f'class="{h.INLINE_CLASS}"'), 3 + 2)
+        self.assertEqual(h.strip_inline(out), h.ensure_office_ns(doc))
+
+    def test_left_indent_reads_margins(self):
+        self.assertEqual(h.left_indent("<p style='margin:0in 0in 0in .75in'>", ""), ".75in")
+        self.assertEqual(h.left_indent('<p style="margin-left:0in">', ""), "")
+        self.assertEqual(h.left_indent("<p class=MsoNormal>", "<style>p.MsoNormal{margin:0in}</style>"), "")
+        self.assertEqual(h.left_indent("<p>", ""), "")
 
     def test_answers_resolve_in_document_order(self):
         out, missing = h.insert_inline(QUOTED, [("Confirm ok", "First."), ("Confirm ok", "Second."), ("Confirm ok", "Third.")])
@@ -187,15 +216,16 @@ class InlineAnswerTests(unittest.TestCase):
     def test_multi_paragraph_answer_and_strip(self):
         out, _ = h.insert_inline(QUOTED, [("Term: One year", "Confirmed.\n\n1. one\n2. two"), ("Line one", "Yes.")])
         self.assertIn(f'<ol class="{h.INLINE_CLASS}"', out)
-        self.assertEqual(h.strip_inline(out), QUOTED)
+        self.assertEqual(h.strip_inline(out), h.ensure_office_ns(QUOTED))
         # Word may drop the quotes around the class when the draft is reopened.
         rewritten = out.replace(f'class="{h.INLINE_CLASS}"', f'class={h.INLINE_CLASS}')
-        self.assertEqual(h.strip_inline(rewritten), QUOTED)
+        self.assertEqual(h.strip_inline(rewritten), h.ensure_office_ns(QUOTED))
 
     def test_no_block_end_appends_before_body_close(self):
         out, missing = h.insert_inline("<body><span>only text</span></body>", [("only text", "ans")])
         self.assertEqual(missing, [])
-        self.assertTrue(out.endswith("ans</span></p></body>"))
+        self.assertIn("ans</span></p>", out)
+        self.assertTrue(out.endswith("<o:p>&nbsp;</o:p></span></p></body>"))
 
 
 if __name__ == "__main__":
