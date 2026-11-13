@@ -225,6 +225,20 @@ class ComErrorWordingTests(unittest.TestCase):
         self.assertEqual(format_com_error(e), "COM Error (0x800401F3): Invalid class string")
 
 
+class DateArgumentTests(unittest.TestCase):
+    def test_a_date_with_no_time_as_an_end_means_the_whole_day(self):
+        from datetime import datetime
+        self.assertEqual(server._parse_end("2026-11-13"), datetime(2026, 11, 14, 0, 0))
+        self.assertEqual(server._parse_end("2026-11-13 12:00"), datetime(2026, 11, 13, 12, 0))
+        self.assertEqual(server._parse_date("2026-11-13"), datetime(2026, 11, 13, 0, 0))
+
+    def test_an_offset_is_converted_to_local_wall_time(self):
+        from datetime import datetime, timezone
+        when = server._parse_date("2026-11-13T17:39:00+00:00")
+        self.assertIsNone(when.tzinfo)
+        self.assertEqual(when, datetime(2026, 11, 13, 17, 39, tzinfo=timezone.utc).astimezone().replace(tzinfo=None))
+
+
 class NonComErrorTests(unittest.TestCase):
     def test_plain_exceptions_are_named(self):
         self.assertEqual(format_com_error(ValueError("Attachment not found: x")), "ValueError: Attachment not found: x")

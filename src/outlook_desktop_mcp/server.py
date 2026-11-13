@@ -1035,7 +1035,7 @@ async def list_emails(
         start_date: Optional. Only return emails received on or after this date.
             ISO 8601 format (e.g. "2026-03-10" or "2026-03-10 09:00").
         end_date: Optional. Only return emails received on or before this date.
-            ISO 8601 format. Default: now (if start_date is provided).
+            ISO 8601 format; a date with no time includes that whole day.
         sender: Optional. Case-insensitive substring of the sender's email
             address or display name, e.g. "freestone" or "linda@". Exchange
             addresses are resolved to SMTP before matching.
@@ -1066,23 +1066,18 @@ async def list_emails(
             if start_date:
                 parts.append(dasl.received_since(_parse_date(start_date)))
             if end_date:
-                parts.append(dasl.received_until(_parse_date(end_date)))
-            elif start_date:
-                parts.append(dasl.received_until(datetime.now()))
+                parts.append(dasl.received_until(_parse_end(end_date)))
             filter_str = dasl.sql(*parts)
         else:
+            # No upper bound unless one is asked for: mail cannot arrive in the future, and
+            # "until now" to the minute dropped whatever arrived in the current minute.
             restrictions = []
             if unread_only:
                 restrictions.append("[UnRead] = True")
             if start_date:
-                start = _parse_date(start_date)
-                restrictions.append(f"[ReceivedTime] >= '{start.strftime('%m/%d/%Y %H:%M')}'")
+                restrictions.append(f"[ReceivedTime] >= '{dasl.jet_date(_parse_date(start_date))}'")
             if end_date:
-                end = _parse_date(end_date)
-                restrictions.append(f"[ReceivedTime] <= '{end.strftime('%m/%d/%Y %H:%M')}'")
-            elif start_date:
-                # Default end to now when start is specified
-                restrictions.append(f"[ReceivedTime] <= '{datetime.now().strftime('%m/%d/%Y %H:%M')}'")
+                restrictions.append(f"[ReceivedTime] <= '{dasl.jet_date(_parse_end(end_date))}'")
             filter_str = " AND ".join(restrictions)
 
         results, partial = _collect_across_stores(namespace, stores, folder, include_subfolders,
@@ -2166,7 +2161,7 @@ async def search_emails(
         start_date: Optional. Only emails received on or after this date.
             ISO 8601 (e.g. "2026-03-10" or "2026-03-10 09:00").
         end_date: Optional. Only emails received on or before this date.
-            ISO 8601. Default: now (if start_date is provided).
+            ISO 8601; a date with no time includes that whole day.
         sender: Optional. Case-insensitive substring of the sender's name or
             email address, e.g. "castelli", "lou@pennspring.com" or "pennspring".
             Matches the real SMTP address even for senders inside the user's own
@@ -2221,9 +2216,7 @@ async def search_emails(
         if start_date:
             dasl_parts.append(dasl.received_since(_parse_date(start_date)))
         if end_date:
-            dasl_parts.append(dasl.received_until(_parse_date(end_date)))
-        elif start_date:
-            dasl_parts.append(dasl.received_until(datetime.now()))
+            dasl_parts.append(dasl.received_until(_parse_end(end_date)))
         if flagged_only:
             dasl_parts.append(dasl.flagged_filter())
         if attachment_name:
@@ -2252,8 +2245,21 @@ async def search_emails(
 # --- Helper: parse ISO date string ---
 
 def _parse_date(date_str: str) -> datetime:
-    """Parse ISO 8601 date string like '2026-02-25 14:00' or '2026-02-25T14:00:00'."""
-    return datetime.fromisoformat(date_str)
+    """Parse ISO 8601 date string like '2026-02-25 14:00' or '2026-02-25T14:00:00', as local
+    wall time. One that carries a UTC offset is converted to local time first."""
+    when = datetime.fromisoformat(date_str.strip())
+    if when.tzinfo is not None:
+        when = when.astimezone().replace(tzinfo=None)
+    return when
+
+
+def _parse_end(date_str: str) -> datetime:
+    """The end of a date range. A date with no time means through the end of that day;
+    read as midnight it left out the whole day it names."""
+    when = _parse_date(date_str)
+    if len(date_str.strip()) <= 10:
+        when += timedelta(days=1)
+    return when
 
 
 def _com_date(date_str: str) -> str:
@@ -2280,8 +2286,8 @@ def _events_in(calendars, start: datetime, end: datetime, count: int, subject_qu
             items.IncludeRecurrences = True
             # Overlap test, so events that started earlier but run into the window are included.
             restrict = (
-                f"[Start] <= '{end.strftime('%m/%d/%Y %H:%M')}' "
-                f"AND [End] >= '{start.strftime('%m/%d/%Y %H:%M')}'"
+                f"[Start] <= '{dasl.jet_date(end)}' "
+                f"AND [End] >= '{dasl.jet_date(start)}'"
             )
             filtered = items.Restrict(restrict)
         except Exception as e:  # one unreadable calendar (e.g. an offline shared mailbox) must not sink the rest
@@ -2430,7 +2436,7 @@ async def list_events(
         store = _require_store(namespace, account)
         calendars = resolve_calendars(store, calendar)
         start = _parse_date(start_date) if start_date else datetime.now()
-        end = _parse_date(end_date) if end_date else start + timedelta(days=7)
+        end = _parse_end(end_date) if end_date else start + timedelta(days=7)
         return json.dumps(_events_in(calendars, start, end, count), indent=2, default=str)
 
     try:
@@ -3164,7 +3170,7 @@ async def search_events(
         store = _require_store(namespace, account)
         calendars = resolve_calendars(store, calendar)
         start = _parse_date(start_date) if start_date else datetime.now() - timedelta(days=30)
-        end = _parse_date(end_date) if end_date else datetime.now() + timedelta(days=30)
+        end = _parse_end(end_date) if end_date else datetime.now() + timedelta(days=30)
         events = _events_in(calendars, start, end, count, query)
         return _results_json(events, False, [], time.perf_counter() - t0)
 

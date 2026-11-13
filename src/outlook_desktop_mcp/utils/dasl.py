@@ -11,7 +11,7 @@ message's own copy of the sender's SMTP address; inside an Exchange organisation
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 FROM_NAME = "urn:schemas:httpmail:fromname"
 FROM_EMAIL = "urn:schemas:httpmail:fromemail"
@@ -45,9 +45,20 @@ def escape_quotes(text: str) -> str:
     return text.replace("'", "''").replace('"', '""')
 
 
+_STAMP = "%m/%d/%Y %I:%M %p"
+
+
 def jet_date(when: datetime) -> str:
-    """The date format Outlook's filters accept."""
-    return when.strftime("%m/%d/%Y %H:%M")
+    """A local time as Jet filters (``[ReceivedTime] >= '...'``) read it. Twelve-hour with
+    AM/PM on purpose: a 24-hour literal for an early-morning hour ("07:00") matches nothing."""
+    return when.strftime(_STAMP)
+
+
+def utc_date(when: datetime) -> str:
+    """The same moment as a DASL filter reads it. DASL date literals are UTC; a local time
+    written into one moves the window by the UTC offset, which hid the newest five hours of
+    mail from every search with a date. A naive ``when`` is local time."""
+    return when.astimezone(timezone.utc).strftime(_STAMP)
 
 
 def contains(prop: str, needle: str) -> str:
@@ -130,11 +141,11 @@ def subject_or_body_filter(needle: str, indexed_body: bool = False) -> str:
 
 
 def received_since(when: datetime) -> str:
-    return f"\"{DATE_RECEIVED}\" >= '{jet_date(when)}'"
+    return f"\"{DATE_RECEIVED}\" >= '{utc_date(when)}'"
 
 
 def received_until(when: datetime) -> str:
-    return f"\"{DATE_RECEIVED}\" <= '{jet_date(when)}'"
+    return f"\"{DATE_RECEIVED}\" <= '{utc_date(when)}'"
 
 
 def unread_filter() -> str:

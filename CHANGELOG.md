@@ -3,6 +3,27 @@
 All notable changes to this fork. The version is in `pyproject.toml` and
 `outlook_desktop_mcp.__version__`; `outlook-desktop-mcp.exe --version` and `health_check` report it.
 
+## 0.11.6 - 2026-11-13
+
+### Fixed
+- **`search_emails` with a date could not see the newest mail.** Its filter is in Outlook's
+  DASL dialect, whose date literals are UTC, and the server wrote local time into it. In
+  New York that moved the whole window five hours back: a reply that arrived at 12:39 was
+  invisible to five searches in a row, and so was everything else from the last five
+  hours, the mail most often asked about. Dates in those filters are now converted to UTC.
+  The same filter is behind `list_emails` with `flagged_only` and `contact_history`.
+- **A start time early in the morning matched nothing.** Outlook's other filter dialect
+  returns no items for a 24-hour literal such as "07:00" (it works from about 09:00), so
+  `list_emails` or `list_events` from 1 to 8 a.m. came back empty. Times are now written
+  with AM/PM, which Outlook reads correctly at every hour.
+- **An end date with no time left out the day it names.** `end_date="2026-11-12"` meant
+  midnight at the start of the 12th. It now means through the end of that day, for mail
+  and for events.
+- With a `start_date` and no `end_date`, nothing caps the range at "now": the cap was cut
+  to the minute and dropped mail that arrived in the current minute.
+- A date carrying a UTC offset ("…T12:00:00-05:00") is converted to local time instead of
+  having its offset ignored.
+
 ## 0.11.5 - 2026-11-13
 
 ### Added

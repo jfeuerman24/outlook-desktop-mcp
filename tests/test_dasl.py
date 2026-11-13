@@ -13,7 +13,22 @@ class EscapeTests(unittest.TestCase):
         self.assertEqual(dasl.escape_like("O'Brien \"q\""), "O''Brien \"\"q\"\"")
 
     def test_jet_date(self):
-        self.assertEqual(dasl.jet_date(datetime(2026, 3, 9, 7, 5)), "03/09/2026 07:05")
+        # Twelve-hour with AM/PM: Outlook matches nothing for a 24-hour early-morning literal.
+        self.assertEqual(dasl.jet_date(datetime(2026, 3, 9, 7, 5)), "03/09/2026 07:05 AM")
+        self.assertEqual(dasl.jet_date(datetime(2026, 3, 9, 19, 5)), "03/09/2026 07:05 PM")
+        self.assertEqual(dasl.jet_date(datetime(2026, 3, 9, 0, 0)), "03/09/2026 12:00 AM")
+
+    def test_dasl_dates_are_utc(self):
+        from datetime import timedelta, timezone
+        eastern = timezone(timedelta(hours=-5))
+        noon = datetime(2026, 11, 13, 12, 39, tzinfo=eastern)
+        self.assertEqual(dasl.utc_date(noon), "11/13/2026 05:39 PM")
+        self.assertEqual(dasl.utc_date(datetime(2026, 11, 13, 21, 0, tzinfo=eastern)), "11/14/2026 02:00 AM")
+        self.assertEqual(dasl.received_since(noon), f"\"{dasl.DATE_RECEIVED}\" >= '11/13/2026 05:39 PM'")
+        self.assertEqual(dasl.received_until(noon), f"\"{dasl.DATE_RECEIVED}\" <= '11/13/2026 05:39 PM'")
+        # A naive time is local wall time, converted with the machine's own offset.
+        local = datetime(2026, 7, 1, 9, 0)
+        self.assertEqual(dasl.utc_date(local), local.astimezone(timezone.utc).strftime("%m/%d/%Y %I:%M %p"))
 
 
 class FlagFilterTests(unittest.TestCase):
@@ -63,11 +78,6 @@ class FilterTests(unittest.TestCase):
         both = dasl.subject_or_body_filter("x", indexed_body=True)
         self.assertIn("LIKE '%x%'", both)
         self.assertIn("ci_phrasematch 'x'", both)
-
-    def test_date_bounds(self):
-        d = datetime(2026, 10, 1, 0, 0)
-        self.assertEqual(dasl.received_since(d), f"\"{dasl.DATE_RECEIVED}\" >= '10/01/2026 00:00'")
-        self.assertEqual(dasl.received_until(d), f"\"{dasl.DATE_RECEIVED}\" <= '10/01/2026 00:00'")
 
     def test_people_filter_covers_sender_and_recipients(self):
         f = dasl.people_filter("earlgrayandsons.com", ["Mike Gray"])
